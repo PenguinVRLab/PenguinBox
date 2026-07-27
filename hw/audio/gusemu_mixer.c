@@ -1,0 +1,236 @@
+/*
+ * GUSEMU32 - mixing engine (similar to Interwave GF1 compatibility)
+ *
+ * Copyright (C) 2000-2007 Tibor "TS" Schütz
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+#include "qemu/osdep.h"
+#include "gusemu.h"
+#include "gustate.h"
+
+#define GUSregb(position)  (*            (gusptr+(position)))
+#define GUSregw(position)  (*(uint16_t *) (gusptr+(position)))
+#define GUSregd(position)  (*(uint32_t *)(gusptr + (position)))
+
+#define GUSvoice(position) (*(uint16_t *)(voiceptr+(position)))
+
+void gus_mixvoices(GUSEmuState * state, unsigned int playback_freq, unsigned int numsamples,
+                   int16_t *bufferpos)
+{
+    uint8_t        *gusptr;
+    int             Voice;
+    uint16_t       *voiceptr;
+
+    unsigned int    count;
+    for (count = 0; count < numsamples * 2; count++)
+        *(bufferpos + count) = 0;
+
+    gusptr = state->gusdatapos;
+    voiceptr = (uint16_t *) gusptr;
+    if (!(GUSregb(GUS4cReset) & 0x01))
+        return;
+
+    for (Voice = 0; Voice <= (GUSregb(NumVoices) & 31); Voice++)
+    {
+        if (GUSvoice(wVSRControl)        &  0x200)
+            GUSvoice(wVSRControl)        |= 0x100;
+        if (GUSvoice(wVSRVolRampControl) &  0x200)
+            GUSvoice(wVSRVolRampControl) |= 0x100;
+        if (!(GUSvoice(wVSRControl) & GUSvoice(wVSRVolRampControl) & 0x100))
+        {
+            unsigned int    sample;
+
+            unsigned int    LoopStart = (GUSvoice(wVSRLoopStartHi) << 16) | GUSvoice(wVSRLoopStartLo);
+            unsigned int    LoopEnd   = (GUSvoice(wVSRLoopEndHi)   << 16) | GUSvoice(wVSRLoopEndLo);
+            unsigned int    CurrPos   = (GUSvoice(wVSRCurrPosHi)   << 16) | GUSvoice(wVSRCurrPosLo);
+            int             VoiceIncrement = ((((unsigned long) GUSvoice(wVSRFreq) * 44100) / playback_freq) * (14 >> 1)) /
+                                             ((GUSregb(NumVoices) & 31) + 1);
+
+            int             PanningPos = (GUSvoice(wVSRPanning) >> 8) & 0xf;
+
+            unsigned int    Volume32   = 32 * GUSvoice(wVSRCurrVol);
+            unsigned int    StartVol32 = (GUSvoice(wVSRVolRampStartVol) & 0xff00) * 32;
+            unsigned int    EndVol32   = (GUSvoice(wVSRVolRampEndVol)   & 0xff00) * 32;
+            int             VolumeIncrement32 = (32 * 16 * (GUSvoice(wVSRVolRampRate) & 0x3f00) >> 8) >> ((((GUSvoice(wVSRVolRampRate) & 0xc000) >> 8) >> 6) * 3);
+            VolumeIncrement32 = (((VolumeIncrement32 * 44100 / 2) / playback_freq) * 14) / ((GUSregb(NumVoices) & 31) + 1);
+
+            if (GUSvoice(wVSRControl) & 0x4000)
+                VoiceIncrement    = -VoiceIncrement;
+            if (GUSvoice(wVSRVolRampControl) & 0x4000)
+                VolumeIncrement32 = -VolumeIncrement32;
+
+            for (sample = 0; sample < numsamples; sample++)
+            {
+                int             sample1, sample2, Volume;
+                if (GUSvoice(wVSRControl) & 0x400)
+                {
+                    int offset = ((CurrPos >> 9) & 0xc0000) + (((CurrPos >> 9) & 0x1ffff) << 1);
+                    int8_t *adr;
+                    adr = (int8_t *) state->himemaddr + offset;
+                    sample1 = (*adr & 0xff) + (*(adr + 1) * 256);
+                    sample2 = (*(adr + 2) & 0xff) + (*(adr + 2 + 1) * 256);
+                }
+                else
+                {
+                    int offset = (CurrPos >> 9) & 0xfffff;
+                    int8_t *adr;
+                    adr = (int8_t *) state->himemaddr + offset;
+                    sample1 = (*adr) * 256;
+                    sample2 = (*(adr + 1)) * 256;
+                }
+
+                Volume = ((((Volume32 >> (4 + 5)) & 0xff) + 256) << (Volume32 >> ((4 + 8) + 5))) / 512;
+                sample1 = (((sample1 * Volume) >> 16) * (512 - (CurrPos % 512))) / 512;
+                sample2 = (((sample2 * Volume) >> 16) * (CurrPos % 512)) / 512;
+                sample1 += sample2;
+
+                if (!(GUSvoice(wVSRVolRampControl) & 0x100))
+                {
+                    Volume32 += VolumeIncrement32;
+                    if ((GUSvoice(wVSRVolRampControl) & 0x4000) ? (Volume32 <= StartVol32) : (Volume32 >= EndVol32))
+                    {
+                        if (GUSvoice(wVSRVolRampControl) & 0x2000)
+                            GUSvoice(wVSRVolRampControl) |= 0x8000;
+                        if (GUSvoice(wVSRVolRampControl) & 0x800)
+                        {
+                            if (GUSvoice(wVSRVolRampControl) & 0x1000)
+                            {
+                                GUSvoice(wVSRVolRampControl) ^= 0x4000;
+                                VolumeIncrement32 = -VolumeIncrement32;
+                            }
+                            else
+                                Volume32 = (GUSvoice(wVSRVolRampControl) & 0x4000) ? EndVol32 : StartVol32;
+                        }
+                        else
+                        {
+                            GUSvoice(wVSRVolRampControl) |= 0x100;
+                            Volume32 =
+                                (GUSvoice(wVSRVolRampControl) & 0x4000) ? StartVol32 : EndVol32;
+                        }
+                    }
+                }
+                if ((GUSvoice(wVSRVolRampControl) & 0xa000) == 0xa000)
+                {
+                    GUSregd(voicevolrampirq) |= 1 << Voice;
+                }
+                else
+                {
+                    GUSregd(voicevolrampirq) &= (~(1 << Voice));
+                    GUSvoice(wVSRVolRampControl) &= 0x7f00;
+                }
+
+                if (!(GUSvoice(wVSRControl) & 0x100))
+                {
+                    CurrPos += VoiceIncrement;
+                    if ((GUSvoice(wVSRControl) & 0x4000) ? (CurrPos <= LoopStart) : (CurrPos >= LoopEnd))
+                    {
+                        if (GUSvoice(wVSRControl) & 0x2000)
+                            GUSvoice(wVSRControl) |= 0x8000;
+                        if (GUSvoice(wVSRControl) & 0x800)
+                        {
+                            if (GUSvoice(wVSRControl) & 0x1000)
+                            {
+                                GUSvoice(wVSRControl) ^= 0x4000;
+                                VoiceIncrement = -VoiceIncrement;
+                            }
+                            else
+                                CurrPos = (GUSvoice(wVSRControl) & 0x4000) ? LoopEnd : LoopStart;
+                        }
+                        else if (!(GUSvoice(wVSRVolRampControl) & 0x400))
+                            GUSvoice(wVSRControl) |= 0x100;
+                    }
+                }
+                if ((GUSvoice(wVSRControl) & 0xa000) == 0xa000)
+                {
+                    GUSregd(voicewavetableirq) |= 1 << Voice;
+                }
+                else
+                {
+                    GUSregd(voicewavetableirq) &= (~(1 << Voice));
+                    GUSvoice(wVSRControl) &= 0x7f00;
+                }
+
+                *(bufferpos + 2 * sample)     += (int16_t) ((sample1 * PanningPos) >> 4);
+                *(bufferpos + 2 * sample + 1) += (int16_t) ((sample1 * (15 - PanningPos)) >> 4);
+            }
+            GUSvoice(wVSRCurrVol)   = Volume32 / 32;
+            GUSvoice(wVSRCurrPosHi) = CurrPos >> 16;
+            GUSvoice(wVSRCurrPosLo) = CurrPos & 0xffff;
+        }
+        voiceptr += 16;
+    }
+}
+
+void gus_irqgen(GUSEmuState * state, unsigned int elapsed_time)
+{
+    int             requestedIRQs = 0;
+    uint8_t        *gusptr;
+    gusptr = state->gusdatapos;
+    if (GUSregb(TimerDataReg2x9) & 1)
+    {
+        unsigned int    timer1fraction = state->timer1fraction;
+        int             newtimerirqs;
+        newtimerirqs          = (elapsed_time + timer1fraction) / (80 * (256 - GUSregb(GUS46Counter1)));
+        state->timer1fraction = (elapsed_time + timer1fraction) % (80 * (256 - GUSregb(GUS46Counter1)));
+        if (newtimerirqs)
+        {
+            if (!(GUSregb(TimerDataReg2x9) & 0x40))
+                GUSregb(TimerStatus2x8) |= 0xc0;
+            if (GUSregb(GUS45TimerCtrl) & 4)
+            {
+                GUSregb(TimerStatus2x8) |= 4;
+                GUSregb(IRQStatReg2x6)  |= 4;
+                GUSregw(TimerIRQs) += newtimerirqs;
+                requestedIRQs += newtimerirqs;
+            }
+        }
+    }
+    if (GUSregb(TimerDataReg2x9) & 2)
+    {
+        unsigned int timer2fraction = state->timer2fraction;
+        int             newtimerirqs;
+        newtimerirqs          = (elapsed_time + timer2fraction) / (320 * (256 - GUSregb(GUS47Counter2)));
+        state->timer2fraction = (elapsed_time + timer2fraction) % (320 * (256 - GUSregb(GUS47Counter2)));
+        if (newtimerirqs)
+        {
+            if (!(GUSregb(TimerDataReg2x9) & 0x20))
+                GUSregb(TimerStatus2x8) |= 0xa0;
+            if (GUSregb(GUS45TimerCtrl) & 8)
+            {
+                GUSregb(TimerStatus2x8) |= 2;
+                GUSregb(IRQStatReg2x6)  |= 8;
+                GUSregw(TimerIRQs) += newtimerirqs;
+                requestedIRQs += newtimerirqs;
+            }
+        }
+    }
+    if (GUSregb(GUS4cReset) & 0x4)
+    {
+        if (GUSregd(voicewavetableirq))
+            GUSregb(IRQStatReg2x6) |= 0x20;
+        if (GUSregd(voicevolrampirq))
+            GUSregb(IRQStatReg2x6) |= 0x40;
+    }
+    if ((!requestedIRQs) && GUSregb(IRQStatReg2x6))
+        requestedIRQs++;
+    if (GUSregb(IRQStatReg2x6))
+        GUSregw(BusyTimerIRQs) = GUS_irqrequest(state, state->gusirq, requestedIRQs);
+}

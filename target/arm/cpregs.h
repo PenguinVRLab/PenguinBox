@@ -1,0 +1,791 @@
+/*
+ * QEMU ARM CP Register access and descriptions
+ *
+ * Copyright (c) 2022 Linaro Ltd
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see
+ * <http://www.gnu.org/licenses/gpl-2.0.html>
+ */
+
+#ifndef TARGET_ARM_CPREGS_H
+#define TARGET_ARM_CPREGS_H
+
+#include "hw/registerfields.h"
+#include "exec/memop.h"
+#include "target/arm/kvm-consts.h"
+#include "cpu.h"
+
+enum {
+    ARM_CP_SPECIAL_MASK          = 0x000f,
+    ARM_CP_NOP                   = 0x0001,
+    ARM_CP_WFI                   = 0x0002,
+    ARM_CP_NZCV                  = 0x0003,
+    ARM_CP_CURRENTEL             = 0x0004,
+    ARM_CP_DC_ZVA                = 0x0005,
+    ARM_CP_DC_GVA                = 0x0006,
+    ARM_CP_DC_GZVA               = 0x0007,
+    ARM_CP_GCSPUSHM              = 0x0008,
+    ARM_CP_GCSPOPM               = 0x0009,
+    ARM_CP_GCSPUSHX              = 0x000a,
+    ARM_CP_GCSPOPX               = 0x000b,
+    ARM_CP_GCSPOPCX              = 0x000c,
+    ARM_CP_GCSSS1                = 0x000d,
+    ARM_CP_GCSSS2                = 0x000e,
+
+    ARM_CP_CONST                 = 1 << 4,
+    ARM_CP_64BIT                 = 1 << 5,
+    ARM_CP_SUPPRESS_TB_END       = 1 << 6,
+    ARM_CP_OVERRIDE              = 1 << 7,
+    ARM_CP_ALIAS                 = 1 << 8,
+    ARM_CP_IO                    = 1 << 9,
+    ARM_CP_NO_RAW                = 1 << 10,
+    ARM_CP_RAISES_EXC            = 1 << 11,
+    ARM_CP_NEWEL                 = 1 << 12,
+    ARM_CP_FPU                   = 1 << 13,
+    ARM_CP_SVE                   = 1 << 14,
+    ARM_CP_NO_GDB                = 1 << 15,
+    ARM_CP_EL3_NO_EL2_UNDEF      = 1 << 16,
+    ARM_CP_EL3_NO_EL2_KEEP       = 1 << 17,
+    ARM_CP_EL3_NO_EL2_C_NZ       = 1 << 18,
+    ARM_CP_SME                   = 1 << 19,
+    ARM_CP_NV2_REDIRECT          = 1 << 20,
+    ARM_CP_ADD_TLBI_NXS          = 1 << 21,
+    ARM_CP_NV_NO_TRAP            = 1 << 22,
+};
+
+#define CP_REG_AA64_SHIFT 28
+#define CP_REG_AA64_MASK (1 << CP_REG_AA64_SHIFT)
+
+#define CP_REG_AA32_NS_SHIFT     29
+#define CP_REG_AA32_NS_MASK      (1 << CP_REG_AA32_NS_SHIFT)
+
+#define CP_REG_AA32_64BIT_SHIFT  15
+#define CP_REG_AA32_64BIT_MASK   (1 << CP_REG_AA32_64BIT_SHIFT)
+
+#define ENCODE_CP_REG(cp, is64, ns, crn, crm, opc1, opc2)   \
+    (((ns) << CP_REG_AA32_NS_SHIFT) |                       \
+     ((is64) << CP_REG_AA32_64BIT_SHIFT) |                  \
+     ((cp) << 16) | ((crn) << 11) | ((crm) << 7) | ((opc1) << 3) | (opc2))
+
+#define ENCODE_AA64_CP_REG(op0, op1, crn, crm, op2) \
+    (CP_REG_AA64_MASK | CP_REG_ARM64_SYSREG |           \
+     ((op0) << CP_REG_ARM64_SYSREG_OP0_SHIFT) |         \
+     ((op1) << CP_REG_ARM64_SYSREG_OP1_SHIFT) |         \
+     ((crn) << CP_REG_ARM64_SYSREG_CRN_SHIFT) |         \
+     ((crm) << CP_REG_ARM64_SYSREG_CRM_SHIFT) |         \
+     ((op2) << CP_REG_ARM64_SYSREG_OP2_SHIFT))
+
+static inline uint32_t kvm_to_cpreg_id(uint64_t kvmid)
+{
+    uint32_t cpregid = kvmid;
+    if ((kvmid & CP_REG_ARCH_MASK) == CP_REG_ARM64) {
+        cpregid |= CP_REG_AA64_MASK;
+    } else {
+        if ((kvmid & CP_REG_SIZE_MASK) == CP_REG_SIZE_U64) {
+            cpregid |= CP_REG_AA32_64BIT_MASK;
+        }
+
+         cpregid |= CP_REG_AA32_NS_MASK;
+    }
+    return cpregid;
+}
+
+static inline uint64_t cpreg_to_kvm_id(uint32_t cpregid)
+{
+    uint64_t kvmid;
+
+    if (cpregid & CP_REG_AA64_MASK) {
+        kvmid = cpregid & ~CP_REG_AA64_MASK;
+        kvmid |= CP_REG_SIZE_U64 | CP_REG_ARM64;
+    } else {
+        kvmid = cpregid & ~CP_REG_AA32_64BIT_MASK;
+        if (cpregid & CP_REG_AA32_64BIT_MASK) {
+            kvmid |= CP_REG_SIZE_U64 | CP_REG_ARM;
+        } else {
+            kvmid |= CP_REG_SIZE_U32 | CP_REG_ARM;
+        }
+    }
+    return kvmid;
+}
+
+typedef enum {
+    ARM_CP_STATE_AA32 = 0,
+    ARM_CP_STATE_AA64 = 1,
+    ARM_CP_STATE_BOTH = 2,
+} CPState;
+
+typedef enum {
+    ARM_CP_SECSTATE_BOTH = 0,
+    ARM_CP_SECSTATE_S =   (1 << 0),
+    ARM_CP_SECSTATE_NS =  (1 << 1),
+} CPSecureState;
+
+typedef enum {
+    PL3_R = 0x80,
+    PL3_W = 0x40,
+    PL2_R = 0x20 | PL3_R,
+    PL2_W = 0x10 | PL3_W,
+    PL1_R = 0x08 | PL2_R,
+    PL1_W = 0x04 | PL2_W,
+    PL0_R = 0x02 | PL1_R,
+    PL0_W = 0x01 | PL1_W,
+
+#ifdef CONFIG_USER_ONLY
+    PL0U_R = PL0_R,
+#else
+    PL0U_R = PL1_R,
+#endif
+
+    PL3_RW = PL3_R | PL3_W,
+    PL2_RW = PL2_R | PL2_W,
+    PL1_RW = PL1_R | PL1_W,
+    PL0_RW = PL0_R | PL0_W,
+} CPAccessRights;
+
+typedef enum CPAccessResult {
+    CP_ACCESS_OK = 0,
+
+    CP_ACCESS_EL_MASK = 3,
+
+    CP_ACCESS_TRAP_BIT = (1 << 2),
+    CP_ACCESS_TRAP_EL1 = CP_ACCESS_TRAP_BIT | 1,
+    CP_ACCESS_TRAP_EL2 = CP_ACCESS_TRAP_BIT | 2,
+    CP_ACCESS_TRAP_EL3 = CP_ACCESS_TRAP_BIT | 3,
+
+    CP_ACCESS_UNDEFINED = (2 << 2),
+
+    CP_ACCESS_EXLOCK = (3 << 2),
+} CPAccessResult;
+
+#define FGTREG_HFGRTR 0
+#define FGTREG_HDFGRTR 1
+#define FGTREG_HFGWTR 0
+#define FGTREG_HDFGWTR 1
+#define FGTREG_HFGITR 0
+
+FIELD(HFGRTR_EL2, AFSR0_EL1, 0, 1)
+FIELD(HFGRTR_EL2, AFSR1_EL1, 1, 1)
+FIELD(HFGRTR_EL2, AIDR_EL1, 2, 1)
+FIELD(HFGRTR_EL2, AMAIR_EL1, 3, 1)
+FIELD(HFGRTR_EL2, APDAKEY, 4, 1)
+FIELD(HFGRTR_EL2, APDBKEY, 5, 1)
+FIELD(HFGRTR_EL2, APGAKEY, 6, 1)
+FIELD(HFGRTR_EL2, APIAKEY, 7, 1)
+FIELD(HFGRTR_EL2, APIBKEY, 8, 1)
+FIELD(HFGRTR_EL2, CCSIDR_EL1, 9, 1)
+FIELD(HFGRTR_EL2, CLIDR_EL1, 10, 1)
+FIELD(HFGRTR_EL2, CONTEXTIDR_EL1, 11, 1)
+FIELD(HFGRTR_EL2, CPACR_EL1, 12, 1)
+FIELD(HFGRTR_EL2, CSSELR_EL1, 13, 1)
+FIELD(HFGRTR_EL2, CTR_EL0, 14, 1)
+FIELD(HFGRTR_EL2, DCZID_EL0, 15, 1)
+FIELD(HFGRTR_EL2, ESR_EL1, 16, 1)
+FIELD(HFGRTR_EL2, FAR_EL1, 17, 1)
+FIELD(HFGRTR_EL2, ISR_EL1, 18, 1)
+FIELD(HFGRTR_EL2, LORC_EL1, 19, 1)
+FIELD(HFGRTR_EL2, LOREA_EL1, 20, 1)
+FIELD(HFGRTR_EL2, LORID_EL1, 21, 1)
+FIELD(HFGRTR_EL2, LORN_EL1, 22, 1)
+FIELD(HFGRTR_EL2, LORSA_EL1, 23, 1)
+FIELD(HFGRTR_EL2, MAIR_EL1, 24, 1)
+FIELD(HFGRTR_EL2, MIDR_EL1, 25, 1)
+FIELD(HFGRTR_EL2, MPIDR_EL1, 26, 1)
+FIELD(HFGRTR_EL2, PAR_EL1, 27, 1)
+FIELD(HFGRTR_EL2, REVIDR_EL1, 28, 1)
+FIELD(HFGRTR_EL2, SCTLR_EL1, 29, 1)
+FIELD(HFGRTR_EL2, SCXTNUM_EL1, 30, 1)
+FIELD(HFGRTR_EL2, SCXTNUM_EL0, 31, 1)
+FIELD(HFGRTR_EL2, TCR_EL1, 32, 1)
+FIELD(HFGRTR_EL2, TPIDR_EL1, 33, 1)
+FIELD(HFGRTR_EL2, TPIDRRO_EL0, 34, 1)
+FIELD(HFGRTR_EL2, TPIDR_EL0, 35, 1)
+FIELD(HFGRTR_EL2, TTBR0_EL1, 36, 1)
+FIELD(HFGRTR_EL2, TTBR1_EL1, 37, 1)
+FIELD(HFGRTR_EL2, VBAR_EL1, 38, 1)
+FIELD(HFGRTR_EL2, ICC_IGRPENN_EL1, 39, 1)
+FIELD(HFGRTR_EL2, ERRIDR_EL1, 40, 1)
+FIELD(HFGRTR_EL2, ERRSELR_EL1, 41, 1)
+FIELD(HFGRTR_EL2, ERXFR_EL1, 42, 1)
+FIELD(HFGRTR_EL2, ERXCTLR_EL1, 43, 1)
+FIELD(HFGRTR_EL2, ERXSTATUS_EL1, 44, 1)
+FIELD(HFGRTR_EL2, ERXMISCN_EL1, 45, 1)
+FIELD(HFGRTR_EL2, ERXPFGF_EL1, 46, 1)
+FIELD(HFGRTR_EL2, ERXPFGCTL_EL1, 47, 1)
+FIELD(HFGRTR_EL2, ERXPFGCDN_EL1, 48, 1)
+FIELD(HFGRTR_EL2, ERXADDR_EL1, 49, 1)
+FIELD(HFGRTR_EL2, NACCDATA_EL1, 50, 1)
+FIELD(HFGRTR_EL2, NGCS_EL0, 52, 1)
+FIELD(HFGRTR_EL2, NGCS_EL1, 53, 1)
+FIELD(HFGRTR_EL2, NSMPRI_EL1, 54, 1)
+FIELD(HFGRTR_EL2, NTPIDR2_EL0, 55, 1)
+FIELD(HFGRTR_EL2, NRCWMASK_EL1, 56, 1)
+FIELD(HFGRTR_EL2, NPIRE0_EL1, 57, 1)
+FIELD(HFGRTR_EL2, NPIR_EL1, 58, 1)
+FIELD(HFGRTR_EL2, NPOR_EL0, 59, 1)
+FIELD(HFGRTR_EL2, NPOR_EL1, 60, 1)
+FIELD(HFGRTR_EL2, NS2POR_EL1, 61, 1)
+FIELD(HFGRTR_EL2, NMAIR2_EL1, 62, 1)
+FIELD(HFGRTR_EL2, NAMAIR2_EL1, 63, 1)
+
+FIELD(HFGWTR_EL2, AFSR0_EL1, 0, 1)
+FIELD(HFGWTR_EL2, AFSR1_EL1, 1, 1)
+FIELD(HFGWTR_EL2, AMAIR_EL1, 3, 1)
+FIELD(HFGWTR_EL2, APDAKEY, 4, 1)
+FIELD(HFGWTR_EL2, APDBKEY, 5, 1)
+FIELD(HFGWTR_EL2, APGAKEY, 6, 1)
+FIELD(HFGWTR_EL2, APIAKEY, 7, 1)
+FIELD(HFGWTR_EL2, APIBKEY, 8, 1)
+FIELD(HFGWTR_EL2, CONTEXTIDR_EL1, 11, 1)
+FIELD(HFGWTR_EL2, CPACR_EL1, 12, 1)
+FIELD(HFGWTR_EL2, CSSELR_EL1, 13, 1)
+FIELD(HFGWTR_EL2, ESR_EL1, 16, 1)
+FIELD(HFGWTR_EL2, FAR_EL1, 17, 1)
+FIELD(HFGWTR_EL2, LORC_EL1, 19, 1)
+FIELD(HFGWTR_EL2, LOREA_EL1, 20, 1)
+FIELD(HFGWTR_EL2, LORN_EL1, 22, 1)
+FIELD(HFGWTR_EL2, LORSA_EL1, 23, 1)
+FIELD(HFGWTR_EL2, MAIR_EL1, 24, 1)
+FIELD(HFGWTR_EL2, PAR_EL1, 27, 1)
+FIELD(HFGWTR_EL2, SCTLR_EL1, 29, 1)
+FIELD(HFGWTR_EL2, SCXTNUM_EL1, 30, 1)
+FIELD(HFGWTR_EL2, SCXTNUM_EL0, 31, 1)
+FIELD(HFGWTR_EL2, TCR_EL1, 32, 1)
+FIELD(HFGWTR_EL2, TPIDR_EL1, 33, 1)
+FIELD(HFGWTR_EL2, TPIDRRO_EL0, 34, 1)
+FIELD(HFGWTR_EL2, TPIDR_EL0, 35, 1)
+FIELD(HFGWTR_EL2, TTBR0_EL1, 36, 1)
+FIELD(HFGWTR_EL2, TTBR1_EL1, 37, 1)
+FIELD(HFGWTR_EL2, VBAR_EL1, 38, 1)
+FIELD(HFGWTR_EL2, ICC_IGRPENN_EL1, 39, 1)
+FIELD(HFGWTR_EL2, ERRSELR_EL1, 41, 1)
+FIELD(HFGWTR_EL2, ERXCTLR_EL1, 43, 1)
+FIELD(HFGWTR_EL2, ERXSTATUS_EL1, 44, 1)
+FIELD(HFGWTR_EL2, ERXMISCN_EL1, 45, 1)
+FIELD(HFGWTR_EL2, ERXPFGCTL_EL1, 47, 1)
+FIELD(HFGWTR_EL2, ERXPFGCDN_EL1, 48, 1)
+FIELD(HFGWTR_EL2, ERXADDR_EL1, 49, 1)
+FIELD(HFGWTR_EL2, NACCDATA_EL1, 50, 1)
+FIELD(HFGWTR_EL2, NGCS_EL0, 52, 1)
+FIELD(HFGWTR_EL2, NGCS_EL1, 53, 1)
+FIELD(HFGWTR_EL2, NSMPRI_EL1, 54, 1)
+FIELD(HFGWTR_EL2, NTPIDR2_EL0, 55, 1)
+FIELD(HFGWTR_EL2, NRCWMASK_EL1, 56, 1)
+FIELD(HFGWTR_EL2, NPIRE0_EL1, 57, 1)
+FIELD(HFGWTR_EL2, NPIR_EL1, 58, 1)
+FIELD(HFGWTR_EL2, NPOR_EL0, 59, 1)
+FIELD(HFGWTR_EL2, NPOR_EL1, 60, 1)
+FIELD(HFGWTR_EL2, NS2POR_EL1, 61, 1)
+FIELD(HFGWTR_EL2, NMAIR2_EL1, 62, 1)
+FIELD(HFGWTR_EL2, NAMAIR2_EL1, 63, 1)
+
+FIELD(HFGITR_EL2, ICIALLUIS, 0, 1)
+FIELD(HFGITR_EL2, ICIALLU, 1, 1)
+FIELD(HFGITR_EL2, ICIVAU, 2, 1)
+FIELD(HFGITR_EL2, DCIVAC, 3, 1)
+FIELD(HFGITR_EL2, DCISW, 4, 1)
+FIELD(HFGITR_EL2, DCCSW, 5, 1)
+FIELD(HFGITR_EL2, DCCISW, 6, 1)
+FIELD(HFGITR_EL2, DCCVAU, 7, 1)
+FIELD(HFGITR_EL2, DCCVAP, 8, 1)
+FIELD(HFGITR_EL2, DCCVADP, 9, 1)
+FIELD(HFGITR_EL2, DCCIVAC, 10, 1)
+FIELD(HFGITR_EL2, DCZVA, 11, 1)
+FIELD(HFGITR_EL2, ATS1E1R, 12, 1)
+FIELD(HFGITR_EL2, ATS1E1W, 13, 1)
+FIELD(HFGITR_EL2, ATS1E0R, 14, 1)
+FIELD(HFGITR_EL2, ATS1E0W, 15, 1)
+FIELD(HFGITR_EL2, ATS1E1RP, 16, 1)
+FIELD(HFGITR_EL2, ATS1E1WP, 17, 1)
+FIELD(HFGITR_EL2, TLBIVMALLE1OS, 18, 1)
+FIELD(HFGITR_EL2, TLBIVAE1OS, 19, 1)
+FIELD(HFGITR_EL2, TLBIASIDE1OS, 20, 1)
+FIELD(HFGITR_EL2, TLBIVAAE1OS, 21, 1)
+FIELD(HFGITR_EL2, TLBIVALE1OS, 22, 1)
+FIELD(HFGITR_EL2, TLBIVAALE1OS, 23, 1)
+FIELD(HFGITR_EL2, TLBIRVAE1OS, 24, 1)
+FIELD(HFGITR_EL2, TLBIRVAAE1OS, 25, 1)
+FIELD(HFGITR_EL2, TLBIRVALE1OS, 26, 1)
+FIELD(HFGITR_EL2, TLBIRVAALE1OS, 27, 1)
+FIELD(HFGITR_EL2, TLBIVMALLE1IS, 28, 1)
+FIELD(HFGITR_EL2, TLBIVAE1IS, 29, 1)
+FIELD(HFGITR_EL2, TLBIASIDE1IS, 30, 1)
+FIELD(HFGITR_EL2, TLBIVAAE1IS, 31, 1)
+FIELD(HFGITR_EL2, TLBIVALE1IS, 32, 1)
+FIELD(HFGITR_EL2, TLBIVAALE1IS, 33, 1)
+FIELD(HFGITR_EL2, TLBIRVAE1IS, 34, 1)
+FIELD(HFGITR_EL2, TLBIRVAAE1IS, 35, 1)
+FIELD(HFGITR_EL2, TLBIRVALE1IS, 36, 1)
+FIELD(HFGITR_EL2, TLBIRVAALE1IS, 37, 1)
+FIELD(HFGITR_EL2, TLBIRVAE1, 38, 1)
+FIELD(HFGITR_EL2, TLBIRVAAE1, 39, 1)
+FIELD(HFGITR_EL2, TLBIRVALE1, 40, 1)
+FIELD(HFGITR_EL2, TLBIRVAALE1, 41, 1)
+FIELD(HFGITR_EL2, TLBIVMALLE1, 42, 1)
+FIELD(HFGITR_EL2, TLBIVAE1, 43, 1)
+FIELD(HFGITR_EL2, TLBIASIDE1, 44, 1)
+FIELD(HFGITR_EL2, TLBIVAAE1, 45, 1)
+FIELD(HFGITR_EL2, TLBIVALE1, 46, 1)
+FIELD(HFGITR_EL2, TLBIVAALE1, 47, 1)
+FIELD(HFGITR_EL2, CFPRCTX, 48, 1)
+FIELD(HFGITR_EL2, DVPRCTX, 49, 1)
+FIELD(HFGITR_EL2, CPPRCTX, 50, 1)
+FIELD(HFGITR_EL2, ERET, 51, 1)
+FIELD(HFGITR_EL2, SVC_EL0, 52, 1)
+FIELD(HFGITR_EL2, SVC_EL1, 53, 1)
+FIELD(HFGITR_EL2, DCCVAC, 54, 1)
+FIELD(HFGITR_EL2, NBRBINJ, 55, 1)
+FIELD(HFGITR_EL2, NBRBIALL, 56, 1)
+FIELD(HFGITR_EL2, NGCSPUSHM_EL1, 57, 1)
+FIELD(HFGITR_EL2, NGCSSTR_EL1, 58, 1)
+FIELD(HFGITR_EL2, NGCSEPP, 59, 1)
+FIELD(HFGITR_EL2, COSPRCTX, 60, 1)
+FIELD(HFGITR_EL2, ATS1E1A, 62, 1)
+
+FIELD(HDFGRTR_EL2, DBGBCRN_EL1, 0, 1)
+FIELD(HDFGRTR_EL2, DBGBVRN_EL1, 1, 1)
+FIELD(HDFGRTR_EL2, DBGWCRN_EL1, 2, 1)
+FIELD(HDFGRTR_EL2, DBGWVRN_EL1, 3, 1)
+FIELD(HDFGRTR_EL2, MDSCR_EL1, 4, 1)
+FIELD(HDFGRTR_EL2, DBGCLAIM, 5, 1)
+FIELD(HDFGRTR_EL2, DBGAUTHSTATUS_EL1, 6, 1)
+FIELD(HDFGRTR_EL2, DBGPRCR_EL1, 7, 1)
+FIELD(HDFGRTR_EL2, OSLSR_EL1, 9, 1)
+FIELD(HDFGRTR_EL2, OSECCR_EL1, 10, 1)
+FIELD(HDFGRTR_EL2, OSDLR_EL1, 11, 1)
+FIELD(HDFGRTR_EL2, PMEVCNTRN_EL0, 12, 1)
+FIELD(HDFGRTR_EL2, PMEVTYPERN_EL0, 13, 1)
+FIELD(HDFGRTR_EL2, PMCCFILTR_EL0, 14, 1)
+FIELD(HDFGRTR_EL2, PMCCNTR_EL0, 15, 1)
+FIELD(HDFGRTR_EL2, PMCNTEN, 16, 1)
+FIELD(HDFGRTR_EL2, PMINTEN, 17, 1)
+FIELD(HDFGRTR_EL2, PMOVS, 18, 1)
+FIELD(HDFGRTR_EL2, PMSELR_EL0, 19, 1)
+FIELD(HDFGRTR_EL2, PMMIR_EL1, 22, 1)
+FIELD(HDFGRTR_EL2, PMBLIMITR_EL1, 23, 1)
+FIELD(HDFGRTR_EL2, PMBPTR_EL1, 24, 1)
+FIELD(HDFGRTR_EL2, PMBSR_EL1, 25, 1)
+FIELD(HDFGRTR_EL2, PMSCR_EL1, 26, 1)
+FIELD(HDFGRTR_EL2, PMSEVFR_EL1, 27, 1)
+FIELD(HDFGRTR_EL2, PMSFCR_EL1, 28, 1)
+FIELD(HDFGRTR_EL2, PMSICR_EL1, 29, 1)
+FIELD(HDFGRTR_EL2, PMSIDR_EL1, 30, 1)
+FIELD(HDFGRTR_EL2, PMSIRR_EL1, 31, 1)
+FIELD(HDFGRTR_EL2, PMSLATFR_EL1, 32, 1)
+FIELD(HDFGRTR_EL2, TRC, 33, 1)
+FIELD(HDFGRTR_EL2, TRCAUTHSTATUS, 34, 1)
+FIELD(HDFGRTR_EL2, TRCAUXCTLR, 35, 1)
+FIELD(HDFGRTR_EL2, TRCCLAIM, 36, 1)
+FIELD(HDFGRTR_EL2, TRCCNTVRn, 37, 1)
+FIELD(HDFGRTR_EL2, TRCID, 40, 1)
+FIELD(HDFGRTR_EL2, TRCIMSPECN, 41, 1)
+FIELD(HDFGRTR_EL2, TRCOSLSR, 43, 1)
+FIELD(HDFGRTR_EL2, TRCPRGCTLR, 44, 1)
+FIELD(HDFGRTR_EL2, TRCSEQSTR, 45, 1)
+FIELD(HDFGRTR_EL2, TRCSSCSRN, 46, 1)
+FIELD(HDFGRTR_EL2, TRCSTATR, 47, 1)
+FIELD(HDFGRTR_EL2, TRCVICTLR, 48, 1)
+FIELD(HDFGRTR_EL2, TRBBASER_EL1, 50, 1)
+FIELD(HDFGRTR_EL2, TRBIDR_EL1, 51, 1)
+FIELD(HDFGRTR_EL2, TRBLIMITR_EL1, 52, 1)
+FIELD(HDFGRTR_EL2, TRBMAR_EL1, 53, 1)
+FIELD(HDFGRTR_EL2, TRBPTR_EL1, 54, 1)
+FIELD(HDFGRTR_EL2, TRBSR_EL1, 55, 1)
+FIELD(HDFGRTR_EL2, TRBTRG_EL1, 56, 1)
+FIELD(HDFGRTR_EL2, PMUSERENR_EL0, 57, 1)
+FIELD(HDFGRTR_EL2, PMCEIDN_EL0, 58, 1)
+FIELD(HDFGRTR_EL2, NBRBIDR, 59, 1)
+FIELD(HDFGRTR_EL2, NBRBCTL, 60, 1)
+FIELD(HDFGRTR_EL2, NBRBDATA, 61, 1)
+FIELD(HDFGRTR_EL2, NPMSNEVFR_EL1, 62, 1)
+FIELD(HDFGRTR_EL2, PMBIDR_EL1, 63, 1)
+
+FIELD(HDFGWTR_EL2, DBGBCRN_EL1, 0, 1)
+FIELD(HDFGWTR_EL2, DBGBVRN_EL1, 1, 1)
+FIELD(HDFGWTR_EL2, DBGWCRN_EL1, 2, 1)
+FIELD(HDFGWTR_EL2, DBGWVRN_EL1, 3, 1)
+FIELD(HDFGWTR_EL2, MDSCR_EL1, 4, 1)
+FIELD(HDFGWTR_EL2, DBGCLAIM, 5, 1)
+FIELD(HDFGWTR_EL2, DBGPRCR_EL1, 7, 1)
+FIELD(HDFGWTR_EL2, OSLAR_EL1, 8, 1)
+FIELD(HDFGWTR_EL2, OSLSR_EL1, 9, 1)
+FIELD(HDFGWTR_EL2, OSECCR_EL1, 10, 1)
+FIELD(HDFGWTR_EL2, OSDLR_EL1, 11, 1)
+FIELD(HDFGWTR_EL2, PMEVCNTRN_EL0, 12, 1)
+FIELD(HDFGWTR_EL2, PMEVTYPERN_EL0, 13, 1)
+FIELD(HDFGWTR_EL2, PMCCFILTR_EL0, 14, 1)
+FIELD(HDFGWTR_EL2, PMCCNTR_EL0, 15, 1)
+FIELD(HDFGWTR_EL2, PMCNTEN, 16, 1)
+FIELD(HDFGWTR_EL2, PMINTEN, 17, 1)
+FIELD(HDFGWTR_EL2, PMOVS, 18, 1)
+FIELD(HDFGWTR_EL2, PMSELR_EL0, 19, 1)
+FIELD(HDFGWTR_EL2, PMSWINC_EL0, 20, 1)
+FIELD(HDFGWTR_EL2, PMCR_EL0, 21, 1)
+FIELD(HDFGWTR_EL2, PMBLIMITR_EL1, 23, 1)
+FIELD(HDFGWTR_EL2, PMBPTR_EL1, 24, 1)
+FIELD(HDFGWTR_EL2, PMBSR_EL1, 25, 1)
+FIELD(HDFGWTR_EL2, PMSCR_EL1, 26, 1)
+FIELD(HDFGWTR_EL2, PMSEVFR_EL1, 27, 1)
+FIELD(HDFGWTR_EL2, PMSFCR_EL1, 28, 1)
+FIELD(HDFGWTR_EL2, PMSICR_EL1, 29, 1)
+FIELD(HDFGWTR_EL2, PMSIRR_EL1, 31, 1)
+FIELD(HDFGWTR_EL2, PMSLATFR_EL1, 32, 1)
+FIELD(HDFGWTR_EL2, TRC, 33, 1)
+FIELD(HDFGWTR_EL2, TRCAUXCTLR, 35, 1)
+FIELD(HDFGWTR_EL2, TRCCLAIM, 36, 1)
+FIELD(HDFGWTR_EL2, TRCCNTVRn, 37, 1)
+FIELD(HDFGWTR_EL2, TRCIMSPECN, 41, 1)
+FIELD(HDFGWTR_EL2, TRCOSLAR, 42, 1)
+FIELD(HDFGWTR_EL2, TRCPRGCTLR, 44, 1)
+FIELD(HDFGWTR_EL2, TRCSEQSTR, 45, 1)
+FIELD(HDFGWTR_EL2, TRCSSCSRN, 46, 1)
+FIELD(HDFGWTR_EL2, TRCVICTLR, 48, 1)
+FIELD(HDFGWTR_EL2, TRFCR_EL1, 49, 1)
+FIELD(HDFGWTR_EL2, TRBBASER_EL1, 50, 1)
+FIELD(HDFGWTR_EL2, TRBLIMITR_EL1, 52, 1)
+FIELD(HDFGWTR_EL2, TRBMAR_EL1, 53, 1)
+FIELD(HDFGWTR_EL2, TRBPTR_EL1, 54, 1)
+FIELD(HDFGWTR_EL2, TRBSR_EL1, 55, 1)
+FIELD(HDFGWTR_EL2, TRBTRG_EL1, 56, 1)
+FIELD(HDFGWTR_EL2, PMUSERENR_EL0, 57, 1)
+FIELD(HDFGWTR_EL2, NBRBCTL, 60, 1)
+FIELD(HDFGWTR_EL2, NBRBDATA, 61, 1)
+FIELD(HDFGWTR_EL2, NPMSNEVFR_EL1, 62, 1)
+
+FIELD(FGT, NXS, 13, 1)
+FIELD(FGT, TYPE, 10, 3)
+FIELD(FGT, REV, 9, 1)
+FIELD(FGT, IDX, 6, 3)
+FIELD(FGT, BITPOS, 0, 6)
+
+#define DO_BIT(REG, BITNAME)                                    \
+    FGT_##BITNAME = FGT_##REG | R_##REG##_EL2_##BITNAME##_SHIFT
+
+#define DO_REV_BIT(REG, BITNAME)                                        \
+    FGT_##BITNAME = FGT_##REG | FGT_REV | R_##REG##_EL2_##BITNAME##_SHIFT
+
+#define DO_TLBINXS_BIT(REG, BITNAME)                             \
+    FGT_##BITNAME = FGT_##REG | R_##REG##_EL2_##BITNAME##_SHIFT, \
+    FGT_##BITNAME##NXS = FGT_##BITNAME | R_FGT_NXS_MASK
+
+typedef enum FGTBit {
+    FGT_R = 1 << R_FGT_TYPE_SHIFT,
+    FGT_W = 2 << R_FGT_TYPE_SHIFT,
+    FGT_EXEC = 4 << R_FGT_TYPE_SHIFT,
+    FGT_RW = FGT_R | FGT_W,
+    FGT_REV = R_FGT_REV_MASK,
+
+    FGT_HFGRTR = FGT_RW | (FGTREG_HFGRTR << R_FGT_IDX_SHIFT),
+    FGT_HFGWTR = FGT_W | (FGTREG_HFGWTR << R_FGT_IDX_SHIFT),
+    FGT_HDFGRTR = FGT_RW | (FGTREG_HDFGRTR << R_FGT_IDX_SHIFT),
+    FGT_HDFGWTR = FGT_W | (FGTREG_HDFGWTR << R_FGT_IDX_SHIFT),
+    FGT_HFGITR = FGT_EXEC | (FGTREG_HFGITR << R_FGT_IDX_SHIFT),
+
+    DO_BIT(HFGRTR, AFSR0_EL1),
+    DO_BIT(HFGRTR, AFSR1_EL1),
+    DO_BIT(HFGRTR, AIDR_EL1),
+    DO_BIT(HFGRTR, AMAIR_EL1),
+    DO_BIT(HFGRTR, APDAKEY),
+    DO_BIT(HFGRTR, APDBKEY),
+    DO_BIT(HFGRTR, APGAKEY),
+    DO_BIT(HFGRTR, APIAKEY),
+    DO_BIT(HFGRTR, APIBKEY),
+    DO_BIT(HFGRTR, CCSIDR_EL1),
+    DO_BIT(HFGRTR, CLIDR_EL1),
+    DO_BIT(HFGRTR, CONTEXTIDR_EL1),
+    DO_BIT(HFGRTR, CPACR_EL1),
+    DO_BIT(HFGRTR, CSSELR_EL1),
+    DO_BIT(HFGRTR, CTR_EL0),
+    DO_BIT(HFGRTR, DCZID_EL0),
+    DO_BIT(HFGRTR, ESR_EL1),
+    DO_BIT(HFGRTR, FAR_EL1),
+    DO_BIT(HFGRTR, ISR_EL1),
+    DO_BIT(HFGRTR, LORC_EL1),
+    DO_BIT(HFGRTR, LOREA_EL1),
+    DO_BIT(HFGRTR, LORID_EL1),
+    DO_BIT(HFGRTR, LORN_EL1),
+    DO_BIT(HFGRTR, LORSA_EL1),
+    DO_BIT(HFGRTR, MAIR_EL1),
+    DO_BIT(HFGRTR, MIDR_EL1),
+    DO_BIT(HFGRTR, MPIDR_EL1),
+    DO_BIT(HFGRTR, PAR_EL1),
+    DO_BIT(HFGRTR, REVIDR_EL1),
+    DO_BIT(HFGRTR, SCTLR_EL1),
+    DO_BIT(HFGRTR, SCXTNUM_EL1),
+    DO_BIT(HFGRTR, SCXTNUM_EL0),
+    DO_BIT(HFGRTR, TCR_EL1),
+    DO_BIT(HFGRTR, TPIDR_EL1),
+    DO_BIT(HFGRTR, TPIDRRO_EL0),
+    DO_BIT(HFGRTR, TPIDR_EL0),
+    DO_BIT(HFGRTR, TTBR0_EL1),
+    DO_BIT(HFGRTR, TTBR1_EL1),
+    DO_BIT(HFGRTR, VBAR_EL1),
+    DO_BIT(HFGRTR, ICC_IGRPENN_EL1),
+    DO_BIT(HFGRTR, ERRIDR_EL1),
+    DO_REV_BIT(HFGRTR, NGCS_EL0),
+    DO_REV_BIT(HFGRTR, NGCS_EL1),
+    DO_REV_BIT(HFGRTR, NSMPRI_EL1),
+    DO_REV_BIT(HFGRTR, NTPIDR2_EL0),
+    DO_REV_BIT(HFGRTR, NPIRE0_EL1),
+    DO_REV_BIT(HFGRTR, NPIR_EL1),
+    DO_REV_BIT(HFGRTR, NMAIR2_EL1),
+    DO_REV_BIT(HFGRTR, NAMAIR2_EL1),
+
+    DO_BIT(HDFGRTR, DBGBCRN_EL1),
+    DO_BIT(HDFGRTR, DBGBVRN_EL1),
+    DO_BIT(HDFGRTR, DBGWCRN_EL1),
+    DO_BIT(HDFGRTR, DBGWVRN_EL1),
+    DO_BIT(HDFGRTR, MDSCR_EL1),
+    DO_BIT(HDFGRTR, DBGCLAIM),
+    DO_BIT(HDFGWTR, OSLAR_EL1),
+    DO_BIT(HDFGRTR, OSLSR_EL1),
+    DO_BIT(HDFGRTR, OSECCR_EL1),
+    DO_BIT(HDFGRTR, OSDLR_EL1),
+    DO_BIT(HDFGRTR, PMEVCNTRN_EL0),
+    DO_BIT(HDFGRTR, PMEVTYPERN_EL0),
+    DO_BIT(HDFGRTR, PMCCFILTR_EL0),
+    DO_BIT(HDFGRTR, PMCCNTR_EL0),
+    DO_BIT(HDFGRTR, PMCNTEN),
+    DO_BIT(HDFGRTR, PMINTEN),
+    DO_BIT(HDFGRTR, PMOVS),
+    DO_BIT(HDFGRTR, PMSELR_EL0),
+    DO_BIT(HDFGWTR, PMSWINC_EL0),
+    DO_BIT(HDFGWTR, PMCR_EL0),
+    DO_BIT(HDFGRTR, PMMIR_EL1),
+    DO_BIT(HDFGRTR, PMCEIDN_EL0),
+
+    DO_BIT(HFGITR, ICIALLUIS),
+    DO_BIT(HFGITR, ICIALLU),
+    DO_BIT(HFGITR, ICIVAU),
+    DO_BIT(HFGITR, DCIVAC),
+    DO_BIT(HFGITR, DCISW),
+    DO_BIT(HFGITR, DCCSW),
+    DO_BIT(HFGITR, DCCISW),
+    DO_BIT(HFGITR, DCCVAU),
+    DO_BIT(HFGITR, DCCVAP),
+    DO_BIT(HFGITR, DCCVADP),
+    DO_BIT(HFGITR, DCCIVAC),
+    DO_BIT(HFGITR, DCZVA),
+    DO_BIT(HFGITR, ATS1E1R),
+    DO_BIT(HFGITR, ATS1E1W),
+    DO_BIT(HFGITR, ATS1E0R),
+    DO_BIT(HFGITR, ATS1E0W),
+    DO_BIT(HFGITR, ATS1E1RP),
+    DO_BIT(HFGITR, ATS1E1WP),
+    DO_TLBINXS_BIT(HFGITR, TLBIVMALLE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIASIDE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVMALLE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIASIDE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVMALLE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIASIDE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAALE1),
+    DO_BIT(HFGITR, CFPRCTX),
+    DO_BIT(HFGITR, DVPRCTX),
+    DO_BIT(HFGITR, CPPRCTX),
+    DO_BIT(HFGITR, DCCVAC),
+    DO_REV_BIT(HFGITR, NGCSPUSHM_EL1),
+    DO_REV_BIT(HFGITR, NGCSEPP),
+    DO_BIT(HFGITR, ATS1E1A),
+} FGTBit;
+
+#undef DO_BIT
+#undef DO_REV_BIT
+
+typedef struct ARMCPRegInfo ARMCPRegInfo;
+
+typedef uint64_t CPReadFn(CPUARMState *env, const ARMCPRegInfo *ri);
+typedef void CPWriteFn(CPUARMState *env, const ARMCPRegInfo *ri,
+                       uint64_t value);
+typedef CPAccessResult CPAccessFn(CPUARMState *env,
+                                  const ARMCPRegInfo *ri,
+                                  bool isread);
+typedef void CPResetFn(CPUARMState *env, const ARMCPRegInfo *ri);
+
+#define CP_ANY 0xff
+
+#define NV2_REDIR_NV1 0x4000
+#define NV2_REDIR_NO_NV1 0x8000
+#define NV2_REDIR_FLAG_MASK 0xc000
+
+struct ARMCPRegInfo {
+    const char *name;
+    uint8_t cp;
+    uint8_t crn;
+    uint8_t crm;
+    uint8_t opc0;
+    uint8_t opc1;
+    uint8_t opc2;
+    CPState state;
+    int type;
+    CPAccessRights access;
+    CPSecureState secure;
+    FGTBit fgt;
+
+    uint32_t nv2_redirect_offset;
+
+    uint32_t vhe_redir_to_el2;
+
+    uint32_t vhe_redir_to_el01;
+
+    uint64_t resetvalue;
+    ptrdiff_t fieldoffset;
+
+    ptrdiff_t bank_fieldoffsets[2];
+
+    CPAccessFn *accessfn;
+    CPReadFn *readfn;
+    CPWriteFn *writefn;
+    CPReadFn *raw_readfn;
+    CPWriteFn *raw_writefn;
+    CPResetFn *resetfn;
+};
+
+void define_one_arm_cp_reg(ARMCPU *cpu, const ARMCPRegInfo *regs);
+void define_arm_cp_regs_len(ARMCPU *cpu, const ARMCPRegInfo *regs, size_t len);
+
+#define define_arm_cp_regs(CPU, REGS)                           \
+    do {                                                        \
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(REGS) == 0);               \
+        define_arm_cp_regs_len(CPU, REGS, ARRAY_SIZE(REGS));    \
+    } while (0)
+
+const ARMCPRegInfo *get_arm_cp_reginfo(GHashTable *cpregs, uint32_t encoded_cp);
+
+typedef struct ARMCPRegUserSpaceInfo {
+    const char *name;
+
+    bool is_glob;
+
+    uint64_t exported_bits;
+
+    uint64_t fixed_bits;
+} ARMCPRegUserSpaceInfo;
+
+void modify_arm_cp_regs_with_len(ARMCPRegInfo *regs, size_t regs_len,
+                                 const ARMCPRegUserSpaceInfo *mods,
+                                 size_t mods_len);
+
+#define modify_arm_cp_regs(REGS, MODS)                                  \
+    do {                                                                \
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(REGS) == 0);                       \
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(MODS) == 0);                       \
+        modify_arm_cp_regs_with_len(REGS, ARRAY_SIZE(REGS),             \
+                                    MODS, ARRAY_SIZE(MODS));            \
+    } while (0)
+
+void arm_cp_write_ignore(CPUARMState *env, const ARMCPRegInfo *ri,
+                         uint64_t value);
+uint64_t arm_cp_read_zero(CPUARMState *env, const ARMCPRegInfo *ri);
+
+uint64_t raw_read(CPUARMState *env, const ARMCPRegInfo *ri);
+
+void raw_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value);
+
+void arm_cp_reset_ignore(CPUARMState *env, const ARMCPRegInfo *ri);
+
+static inline MemOp cpreg_field_type(const ARMCPRegInfo *ri)
+{
+    return (ri->state == ARM_CP_STATE_AA64 || (ri->type & ARM_CP_64BIT)
+            ? MO_64 : MO_32);
+}
+
+static inline bool cp_access_ok(int current_el,
+                                const ARMCPRegInfo *ri, int isread)
+{
+    return (ri->access >> ((current_el * 2) + isread)) & 1;
+}
+
+uint64_t read_raw_cp_reg(CPUARMState *env, const ARMCPRegInfo *ri);
+
+static inline bool arm_cpreg_encoding_in_idspace(uint8_t opc0, uint8_t opc1,
+                                                 uint8_t opc2,
+                                                 uint8_t crn, uint8_t crm)
+{
+    return opc0 == 3 && (opc1 == 0 || opc1 == 1 || opc1 == 3) &&
+        crn == 0 && crm < 8;
+}
+
+/*
+ * As arm_cpreg_encoding_in_idspace(), but take the encoding from an
+ * ARMCPRegInfo.
+ */
+static inline bool arm_cpreg_in_idspace(const ARMCPRegInfo *ri)
+{
+    return ri->state == ARM_CP_STATE_AA64 &&
+        arm_cpreg_encoding_in_idspace(ri->opc0, ri->opc1, ri->opc2,
+                                      ri->crn, ri->crm);
+}
+
+#ifdef CONFIG_USER_ONLY
+static inline void define_cortex_a72_a57_a53_cp_reginfo(ARMCPU *cpu) { }
+#else
+void define_cortex_a72_a57_a53_cp_reginfo(ARMCPU *cpu);
+#endif
+
+CPAccessResult access_tvm_trvm(CPUARMState *, const ARMCPRegInfo *, bool);
+
+static inline bool arm_cpreg_traps_in_nv(const ARMCPRegInfo *ri)
+{
+
+    if (ri->type & ARM_CP_NV_NO_TRAP) {
+        return false;
+    }
+
+    return ri->opc1 == 4 || ri->opc1 == 5;
+}
+
+#define A32_BANKED_REG_GET(_env, _regname, _secure)                     \
+    ((_secure) ? (_env)->cp15._regname##_s : (_env)->cp15._regname##_ns)
+
+#define A32_BANKED_REG_SET(_env, _regname, _secure, _val)       \
+    do {                                                        \
+        if (_secure) {                                          \
+            (_env)->cp15._regname##_s = (_val);                 \
+        } else {                                                \
+            (_env)->cp15._regname##_ns = (_val);                \
+        }                                                       \
+    } while (0)
+
+#define A32_BANKED_CURRENT_REG_GET(_env, _regname)                          \
+    A32_BANKED_REG_GET((_env), _regname,                                    \
+                       (arm_is_secure(_env) && !arm_el_is_aa64((_env), 3)))
+
+#define A32_BANKED_CURRENT_REG_SET(_env, _regname, _val)                    \
+    A32_BANKED_REG_SET((_env), _regname,                                    \
+                       (arm_is_secure(_env) && !arm_el_is_aa64((_env), 3)), \
+                       (_val))
+
+#endif

@@ -1,0 +1,210 @@
+/*
+ * x86 KVM CPU type initialization
+ *
+ * Copyright 2021 SUSE LLC
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
+ */
+
+#include "qemu/osdep.h"
+#include "cpu.h"
+#include "host-cpu.h"
+#include "qapi/error.h"
+#include "system/system.h"
+#include "hw/boards.h"
+#include "hw/i386/x86.h"
+
+#include "kvm_i386.h"
+#include "accel/accel-cpu-target.h"
+
+static void kvm_set_guest_phys_bits(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    uint32_t eax, guest_phys_bits;
+
+    eax = kvm_arch_get_supported_cpuid(cs->kvm_state, 0x80000008, 0, R_EAX);
+    guest_phys_bits = (eax >> 16) & 0xff;
+    if (!guest_phys_bits) {
+        return;
+    }
+    cpu->guest_phys_bits = guest_phys_bits;
+    if (cpu->guest_phys_bits > cpu->phys_bits) {
+        cpu->guest_phys_bits = cpu->phys_bits;
+    }
+
+    if (cpu->host_phys_bits && cpu->host_phys_bits_limit &&
+        cpu->guest_phys_bits > cpu->host_phys_bits_limit) {
+        cpu->guest_phys_bits = cpu->host_phys_bits_limit;
+    }
+}
+
+static bool kvm_cpu_realizefn(CPUState *cs, Error **errp)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    X86CPUClass *xcc = X86_CPU_GET_CLASS(cpu);
+    CPUX86State *env = &cpu->env;
+    bool ret;
+
+    if (xcc->max_features) {
+        if (enable_cpu_pm) {
+            if (kvm_has_waitpkg()) {
+                env->features[FEAT_7_0_ECX] |= CPUID_7_0_ECX_WAITPKG;
+            }
+
+            if (env->features[FEAT_1_ECX] & CPUID_EXT_MONITOR) {
+                host_cpuid(5, 0, &cpu->mwait.eax, &cpu->mwait.ebx,
+                           &cpu->mwait.ecx, &cpu->mwait.edx);
+            }
+        }
+        if (cpu->ucode_rev == 0) {
+            cpu->ucode_rev =
+                kvm_arch_get_supported_msr_feature(kvm_state,
+                                                   MSR_IA32_UCODE_REV);
+        }
+    }
+    ret = host_cpu_realizefn(cs, errp);
+    if (!ret) {
+        return ret;
+    }
+
+    if ((env->features[FEAT_8000_0001_EDX] & CPUID_EXT2_LM) &&
+        cpu->guest_phys_bits == -1) {
+        kvm_set_guest_phys_bits(cs);
+    }
+
+    cs->num_ases = x86_machine_is_smm_enabled(X86_MACHINE(current_machine)) ? 2 : 1;
+    cpu_address_space_init(cs, X86ASIdx_MEM, "cpu-memory", cs->memory);
+
+    return true;
+}
+
+static bool lmce_supported(void)
+{
+    uint64_t mce_cap = 0;
+
+    if (kvm_ioctl(kvm_state, KVM_X86_GET_MCE_CAP_SUPPORTED, &mce_cap) < 0) {
+        return false;
+    }
+    return !!(mce_cap & MCG_LMCE_P);
+}
+
+static void kvm_cpu_max_instance_init(X86CPU *cpu)
+{
+    CPUX86State *env = &cpu->env;
+    KVMState *s = kvm_state;
+
+    object_property_set_bool(OBJECT(cpu), "pmu", true, &error_abort);
+
+    if (lmce_supported()) {
+        object_property_set_bool(OBJECT(cpu), "lmce", true, &error_abort);
+    }
+
+    env->cpuid_min_level =
+        kvm_arch_get_supported_cpuid(s, 0x0, 0, R_EAX);
+    env->cpuid_min_xlevel =
+        kvm_arch_get_supported_cpuid(s, 0x80000000, 0, R_EAX);
+    env->cpuid_min_xlevel2 =
+        kvm_arch_get_supported_cpuid(s, 0xC0000000, 0, R_EAX);
+}
+
+static void kvm_cpu_xsave_init(void)
+{
+    static bool first = true;
+    uint32_t eax, ebx, ecx, edx;
+    int i;
+
+    if (!first) {
+        return;
+    }
+    first = false;
+
+    x86_ext_save_areas[XSTATE_FP_BIT].offset = 0;
+    x86_ext_save_areas[XSTATE_SSE_BIT].offset = 0;
+
+    for (i = XSTATE_SSE_BIT + 1; i < XSAVE_STATE_AREA_COUNT; i++) {
+        ExtSaveArea *esa = &x86_ext_save_areas[i];
+
+        if (!esa->size) {
+            continue;
+        }
+        host_cpuid(0xd, i, &eax, &ebx, &ecx, &edx);
+        if (eax != 0) {
+            assert(esa->size == eax);
+            esa->offset = ebx;
+            esa->ecx = ecx;
+        }
+    }
+}
+
+static PropValue kvm_default_props[] = {
+    { "kvmclock", "on" },
+    { "kvm-nopiodelay", "on" },
+    { "kvm-asyncpf", "on" },
+    { "kvm-steal-time", "on" },
+    { "kvm-pv-eoi", "on" },
+    { "kvmclock-stable-bit", "on" },
+    { "x2apic", "on" },
+    { "kvm-msi-ext-dest-id", "off" },
+    { "acpi", "off" },
+    { "monitor", "off" },
+    { "svm", "off" },
+    { NULL, NULL },
+};
+
+static void x86_cpu_change_kvm_default(const char *prop, const char *value)
+{
+    PropValue *pv;
+    for (pv = kvm_default_props; pv->prop; pv++) {
+        if (!strcmp(pv->prop, prop)) {
+            pv->value = value;
+            break;
+        }
+    }
+
+    assert(pv->prop);
+}
+
+static void kvm_cpu_instance_init(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    X86CPUClass *xcc = X86_CPU_GET_CLASS(cpu);
+
+    host_cpu_instance_init(cpu);
+
+    if (xcc->model) {
+        if (!kvm_irqchip_in_kernel()) {
+            x86_cpu_change_kvm_default("x2apic", "off");
+        } else if (kvm_irqchip_is_split()) {
+            x86_cpu_change_kvm_default("kvm-msi-ext-dest-id", "on");
+        }
+
+        x86_cpu_apply_props(cpu, kvm_default_props);
+    }
+
+    if (xcc->max_features) {
+        kvm_cpu_max_instance_init(cpu);
+    }
+
+    kvm_cpu_xsave_init();
+}
+
+static void kvm_cpu_accel_class_init(ObjectClass *oc, const void *data)
+{
+    AccelCPUClass *acc = ACCEL_CPU_CLASS(oc);
+
+    acc->cpu_target_realize = kvm_cpu_realizefn;
+    acc->cpu_instance_init = kvm_cpu_instance_init;
+}
+static const TypeInfo kvm_cpu_accel_type_info = {
+    .name = ACCEL_CPU_NAME("kvm"),
+
+    .parent = TYPE_ACCEL_CPU,
+    .class_init = kvm_cpu_accel_class_init,
+    .abstract = true,
+};
+static void kvm_cpu_accel_register_types(void)
+{
+    type_register_static(&kvm_cpu_accel_type_info);
+}
+type_init(kvm_cpu_accel_register_types);
