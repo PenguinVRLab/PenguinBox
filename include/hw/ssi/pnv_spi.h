@@ -1,0 +1,64 @@
+/*
+ * QEMU PowerPC SPI model
+ *
+ * Copyright (c) 2024, IBM Corporation.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This model Supports a connection to a single SPI responder.
+ * Introduced for P10 to provide access to SPI seeproms, TPM, flash device
+ * and an ADC controller.
+ *
+ * All SPI function control is mapped into the SPI register space to enable
+ * full control by firmware.
+ *
+ * SPI Controller has sequencer and shift engine. The SPI shift engine
+ * performs serialization and de-serialization according to the control by
+ * the sequencer and according to the setup defined in the configuration
+ * registers and the SPI sequencer implements the main control logic.
+ */
+
+#ifndef PPC_PNV_SPI_H
+#define PPC_PNV_SPI_H
+
+#include "hw/ssi/ssi.h"
+#include "hw/sysbus.h"
+#include "qemu/fifo8.h"
+
+#define TYPE_PNV_SPI "pnv-spi"
+OBJECT_DECLARE_SIMPLE_TYPE(PnvSpi, PNV_SPI)
+
+#define PNV_SPI_REG_SIZE 8
+#define PNV_SPI_REGS 7
+
+#define TYPE_PNV_SPI_BUS "spi"
+typedef struct PnvSpi {
+    SysBusDevice parent_obj;
+
+    SSIBus *ssi_bus;
+    qemu_irq *cs_line;
+    MemoryRegion    xscom_spic_regs;
+    Fifo8 tx_fifo;
+    Fifo8 rx_fifo;
+    uint8_t fail_count;
+    uint32_t        spic_num;
+    uint32_t        chip_id;
+    uint8_t         transfer_len;
+    uint8_t         responder_select;
+    bool            shift_n1_done;
+    uint8_t         loop_counter_1;
+    uint8_t         loop_counter_2;
+    uint8_t         N1_bits;
+    uint8_t         N2_bits;
+    uint8_t         N1_bytes;
+    uint8_t         N2_bytes;
+    uint8_t         N1_tx;
+    uint8_t         N2_tx;
+    uint8_t         N1_rx;
+    uint8_t         N2_rx;
+
+    uint64_t        regs[PNV_SPI_REGS];
+    uint8_t         seq_op[PNV_SPI_REG_SIZE];
+    uint64_t        status;
+} PnvSpi;
+#endif

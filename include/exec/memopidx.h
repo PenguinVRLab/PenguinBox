@@ -1,0 +1,37 @@
+/*
+ * Combine the MemOp and mmu_idx parameters into a single value.
+ *
+ * Authors:
+ *  Richard Henderson <rth@twiddle.net>
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
+ */
+
+#ifndef EXEC_MEMOPIDX_H
+#define EXEC_MEMOPIDX_H
+
+#include "exec/memop.h"
+
+typedef uint32_t MemOpIdx;
+
+static inline MemOpIdx make_memop_idx(MemOp op, unsigned idx)
+{
+#ifdef CONFIG_DEBUG_TCG
+    assert(idx <= 31);
+    assert(clz32(op) >= 5);
+#endif
+    return (op << 5) | idx;
+}
+
+static inline MemOp get_memop(MemOpIdx oi)
+{
+    return oi >> 5;
+}
+
+static inline unsigned get_mmuidx(MemOpIdx oi)
+{
+    return oi & 31;
+}
+
+#endif

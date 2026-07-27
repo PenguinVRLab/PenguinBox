@@ -1,0 +1,39 @@
+/*
+ * ARM SSE-200 CPU_IDENTITY register block
+ *
+ * Copyright (c) 2019 Linaro Limited
+ * Written by Peter Maydell
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 or
+ *  (at your option) any later version.
+ */
+
+/*
+ * This is a model of the "CPU_IDENTITY" register block which is part of the
+ * Arm SSE-200 and documented in
+ * https://developer.arm.com/documentation/101104/latest/
+ *
+ * QEMU interface:
+ *  + QOM property "CPUID": the value to use for the CPUID register
+ *  + sysbus MMIO region 0: the system information register bank
+ */
+
+#ifndef HW_MISC_ARMSSE_CPUID_H
+#define HW_MISC_ARMSSE_CPUID_H
+
+#include "hw/sysbus.h"
+#include "qom/object.h"
+
+#define TYPE_ARMSSE_CPUID "armsse-cpuid"
+OBJECT_DECLARE_SIMPLE_TYPE(ARMSSECPUID, ARMSSE_CPUID)
+
+struct ARMSSECPUID {
+    SysBusDevice parent_obj;
+
+    MemoryRegion iomem;
+
+    uint32_t cpuid;
+};
+
+#endif

@@ -1,0 +1,103 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+/*
+** asm/bootinfo-mac.h -- Macintosh-specific boot information definitions
+*/
+
+#ifndef _UAPI_ASM_M68K_BOOTINFO_MAC_H
+#define _UAPI_ASM_M68K_BOOTINFO_MAC_H
+
+
+#define BI_MAC_MODEL		0x8000
+#define BI_MAC_VADDR		0x8001
+#define BI_MAC_VDEPTH		0x8002
+#define BI_MAC_VROW		0x8003
+#define BI_MAC_VDIM		0x8004
+#define BI_MAC_VLOGICAL		0x8005
+#define BI_MAC_SCCBASE		0x8006
+#define BI_MAC_BTIME		0x8007
+#define BI_MAC_GMTBIAS		0x8008
+#define BI_MAC_MEMSIZE		0x8009
+#define BI_MAC_CPUID		0x800a
+#define BI_MAC_ROMBASE		0x800b
+
+
+#define BI_MAC_VIA1BASE		0x8010
+#define BI_MAC_VIA2BASE		0x8011
+#define BI_MAC_VIA2TYPE		0x8012
+#define BI_MAC_ADBTYPE		0x8013
+#define BI_MAC_ASCBASE		0x8014
+#define BI_MAC_SCSI5380		0x8015
+#define BI_MAC_SCSIDMA		0x8016
+#define BI_MAC_SCSI5396		0x8017
+#define BI_MAC_IDETYPE		0x8018
+#define BI_MAC_IDEBASE		0x8019
+#define BI_MAC_NUBUS		0x801a
+#define BI_MAC_SLOTMASK		0x801b
+#define BI_MAC_SCCTYPE		0x801c
+#define BI_MAC_ETHTYPE		0x801d
+#define BI_MAC_ETHBASE		0x801e
+#define BI_MAC_PMU		0x801f
+#define BI_MAC_IOP_SWIM		0x8020
+#define BI_MAC_IOP_ADB		0x8021
+
+
+#define MAC_MODEL_II		6
+#define MAC_MODEL_IIX		7
+#define MAC_MODEL_IICX		8
+#define MAC_MODEL_SE30		9
+#define MAC_MODEL_IICI		11
+#define MAC_MODEL_IIFX		13
+#define MAC_MODEL_IISI		18
+#define MAC_MODEL_LC		19
+#define MAC_MODEL_Q900		20
+#define MAC_MODEL_PB170		21
+#define MAC_MODEL_Q700		22
+#define MAC_MODEL_CLII		23
+#define MAC_MODEL_PB140		25
+#define MAC_MODEL_Q950		26
+#define MAC_MODEL_LCIII		27
+#define MAC_MODEL_PB210		29
+#define MAC_MODEL_C650		30
+#define MAC_MODEL_PB230		32
+#define MAC_MODEL_PB180		33
+#define MAC_MODEL_PB160		34
+#define MAC_MODEL_Q800		35
+#define MAC_MODEL_Q650		36
+#define MAC_MODEL_LCII		37
+#define MAC_MODEL_PB250		38
+#define MAC_MODEL_IIVI		44
+#define MAC_MODEL_P600		45
+#define MAC_MODEL_IIVX		48
+#define MAC_MODEL_CCL		49
+#define MAC_MODEL_PB165C	50
+#define MAC_MODEL_C610		52
+#define MAC_MODEL_Q610		53
+#define MAC_MODEL_PB145		54
+#define MAC_MODEL_P520		56
+#define MAC_MODEL_C660		60
+#define MAC_MODEL_P460		62
+#define MAC_MODEL_PB180C	71
+#define MAC_MODEL_PB520		72
+#define MAC_MODEL_PB270C	77
+#define MAC_MODEL_Q840		78
+#define MAC_MODEL_P550		80
+#define MAC_MODEL_CCLII		83
+#define MAC_MODEL_PB165		84
+#define MAC_MODEL_PB190		85
+#define MAC_MODEL_TV		88
+#define MAC_MODEL_P475		89
+#define MAC_MODEL_P475F		90
+#define MAC_MODEL_P575		92
+#define MAC_MODEL_Q605		94
+#define MAC_MODEL_Q605_ACC	95
+#define MAC_MODEL_Q630		98
+#define MAC_MODEL_P588		99
+#define MAC_MODEL_PB280		102
+#define MAC_MODEL_PB280C	103
+#define MAC_MODEL_PB150		115
+
+
+#define MAC_BOOTI_VERSION	MK_BI_VERSION(2, 0)
+
+
+#endif
