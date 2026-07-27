@@ -54,6 +54,15 @@ typedef struct MemorySyncRequirement {
 typedef struct RenderPassState {
     VkFormat color_format;
     VkFormat zeta_format;
+    /* loc-graphics-research (v9 feedback): color attachment lives in
+     * VK_IMAGE_LAYOUT_GENERAL (the surface is also sampled while bound).
+     * Extends the render-pass AND pipeline cache keys; render-pass
+     * compatibility ignores layouts, so pipelines/framebuffers interoperate
+     * across variants. */
+    bool color_general;
+    /* v9.3: same for the depth attachment — soft-particle smoke samples the
+     * bound D16 zeta (depth-fade), so it lives in GENERAL too. */
+    bool zeta_general;
 } RenderPassState;
 
 typedef struct RenderPass {
@@ -131,6 +140,14 @@ typedef struct SurfaceBinding {
     size_t size;
 
     bool cleared;
+    /* v9 feedback: sticky — this surface is sampled while bound as the render
+     * target; it RESTS in VK_IMAGE_LAYOUT_GENERAL and its render passes use
+     * the color_general variant. */
+    bool feedback_mode;
+    /* v9: draw_time already covered by a feedback visibility flush — flush
+     * once per redraw, not per bind (a per-bind flush measurably doubled the
+     * render-pass count). */
+    int flushed_draw_time;
     int frame_time;
     int draw_time;
     bool draw_dirty;
@@ -158,6 +175,13 @@ typedef struct SurfaceBinding {
     VkImage image;
     VkImageView image_view;
     VmaAllocation allocation;
+
+    /* loc-graphics-research (zero-copy): tracked layout of `image`. Resting
+     * state is (COLOR|DEPTH_STENCIL)_ATTACHMENT_OPTIMAL; the only code that
+     * may LEAVE a different resting layout is the zero-copy texture bind
+     * (SHADER_READ_ONLY_OPTIMAL) — begin_render_pass restores bound targets.
+     * All transitions of `image` go through pgraph_vk_surface_transition. */
+    VkImageLayout image_layout;
 
     // Used for scaling
     VkImage image_scratch;
@@ -243,6 +267,24 @@ typedef struct TextureBinding {
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;
+    /* loc-graphics-research (XEMU_SURF2TEX_ZEROCOPY): this node's image_view
+     * borrows a surface's VkImage (image/allocation are VK_NULL_HANDLE and
+     * must not be destroyed). borrow_image + borrow_gen (snapshot of
+     * r->surface_generation) staleness-check the borrow on cache hit. */
+    /* v9.4: pg->frame_time of the last depth-as-texture copy into this node.
+     * Soft-particle smoke samples the finished opaque depth ~700x/frame; one
+     * copy per frame is sufficient and correct (the depth it wants is final
+     * before transparents draw). */
+    int copied_frame_time;
+    bool borrowed;
+    uint32_t borrow_gen;
+    VkImage borrow_image;
+    /* Valid ONLY while borrow_gen == r->surface_generation (no invalidation
+     * since the borrow was taken); used for the bind-time layout ensure. */
+    SurfaceBinding *borrow_surface;
+    /* Layout this binding's descriptor declares (SHADER_READ_ONLY_OPTIMAL for
+     * owned nodes and plain borrows; GENERAL for feedback-surface borrows). */
+    VkImageLayout descriptor_layout;
 } TextureBinding;
 
 typedef struct QueryReport {
@@ -414,6 +456,9 @@ typedef struct PGRAPHVkComputeState {
     VkPipelineLayout pipeline_layout;
     Lru pipeline_cache;
     ComputePipeline *pipeline_cache_entries;
+    /* loc-graphics-research: lazy-created Morton deswizzle pipeline for the
+     * surface-as-swizzled-texture bounce (XEMU_SURF2TEX_EXT). */
+    VkPipeline deswizzle_pipeline;
 } PGRAPHVkComputeState;
 
 typedef struct PGRAPHVkState {
@@ -606,6 +651,9 @@ typedef struct PGRAPHVkState {
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
     QTAILQ_HEAD(, SurfaceBinding) invalid_surfaces;
+    /* loc-graphics-research (zero-copy): bumped on every invalidate_surface;
+     * borrowed texture nodes staleness-check against it on cache hit. */
+    uint32_t surface_generation;
     SurfaceBinding *color_binding, *zeta_binding;
     bool downloads_pending;
     QemuEvent downloads_complete;
@@ -933,6 +981,10 @@ void pgraph_vk_refresh_narrowfence_toggle(void); /* once/frame, from flip_stall 
 bool pgraph_vk_narrowfence_enabled(void);
 void pgraph_vk_wait_for_surface_write(PGRAPHState *pg, SurfaceBinding *surface);
 SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
+bool pgraph_vk_alias_surfaces_enabled(void);
+void pgraph_vk_surface_transition(PGRAPHState *pg, VkCommandBuffer cmd,
+                                  SurfaceBinding *surface, VkImageLayout to);
+VkImageLayout pgraph_vk_surface_rest_layout(const SurfaceBinding *surface);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
 int pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
@@ -951,6 +1003,9 @@ void pgraph_vk_init_compute(PGRAPHState *pg);
 bool pgraph_vk_compute_needs_finish(PGRAPHVkState *r);
 void pgraph_vk_compute_finish_complete(PGRAPHVkState *r);
 void pgraph_vk_finalize_compute(PGRAPHState *pg);
+void pgraph_vk_dispatch_deswizzle_u32(PGRAPHState *pg, VkCommandBuffer cmd,
+                                      unsigned int tex_w, unsigned int tex_h,
+                                      unsigned int src_bias_words);
 void pgraph_vk_pack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
                                   VkCommandBuffer cmd, VkBuffer src,
                                   VkBuffer dst, bool downscale);

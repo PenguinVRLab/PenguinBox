@@ -1022,20 +1022,16 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
     StorageBuffer *dst_storage_buffer = &r->storage_buffers[BUFFER_COMPUTE_DST];
     assert(dst_storage_buffer->buffer_size >= copied_image_size);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     vkCmdCopyImageToBuffer(
         cmd, surface->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         dst_storage_buffer->buffer,
         num_regions, regions);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     VkBuffer texture_source_buffer;
 
@@ -1188,11 +1184,8 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
@@ -1214,11 +1207,8 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, texture->image,
                    texture->current_layout, 1, &region);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
@@ -1248,24 +1238,684 @@ static unsigned int vk_format_texel_size(VkFormat format)
     }
 }
 
-static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
+/* loc-graphics-research: reason-coded twin of the historical bool check, so
+ * the bind site can attribute WHY a surface-as-texture bind missed the GPU
+ * copy path (the S2T_MISS_* counters). Leg order mirrors the original
+ * expression exactly; the bool wrapper below is behavior-identical to the
+ * historical check_surface_to_texture_compatiblity. */
+typedef enum S2TCompat {
+    S2T_COMPAT_OK = 0,
+    S2T_COMPAT_PITCH,   /* linear surface, pitch != shape->pitch */
+    S2T_COMPAT_DIMS,    /* width/height mismatch */
+    S2T_COMPAT_CUBEMAP, /* texture shape is a cubemap */
+    S2T_COMPAT_MIPS,    /* texture shape has levels > 1 */
+    S2T_COMPAT_FORMAT,  /* unsupported vk format or texel-size mismatch */
+} S2TCompat;
+
+static S2TCompat surface_to_texture_compat_reason(const SurfaceBinding *surface,
                                                   const TextureShape *shape)
 {
-    if ((!surface->swizzle && surface->pitch != shape->pitch) ||
-        surface->width != shape->width ||
-        surface->height != shape->height ||
-        shape->cubemap ||
-        shape->levels > 1) {
-        return false;
+    if (!surface->swizzle && surface->pitch != shape->pitch) {
+        return S2T_COMPAT_PITCH;
+    }
+    if (surface->width != shape->width || surface->height != shape->height) {
+        return S2T_COMPAT_DIMS;
+    }
+    if (shape->cubemap) {
+        return S2T_COMPAT_CUBEMAP;
+    }
+    if (shape->levels > 1) {
+        return S2T_COMPAT_MIPS;
     }
 
     if (!surface->color) {
-        return true;
+        return S2T_COMPAT_OK;
     }
 
     VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
-    return tex_vkf.vk_format &&
-           surface->host_fmt.host_bytes_per_pixel == vk_format_texel_size(tex_vkf.vk_format);
+    if (!(tex_vkf.vk_format && surface->host_fmt.host_bytes_per_pixel ==
+                                   vk_format_texel_size(tex_vkf.vk_format))) {
+        return S2T_COMPAT_FORMAT;
+    }
+    return S2T_COMPAT_OK;
+}
+
+static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
+                                                  const TextureShape *shape)
+{
+    return surface_to_texture_compat_reason(surface, shape) == S2T_COMPAT_OK;
+}
+
+/* loc-graphics-research: XEMU_SURF2TEX_EXT getenv-once gate. -1 = unprobed,
+ * 0 = off, 1 = on. XEMU_NO_SURF2TEX_EXT is the kill-switch and wins over
+ * XEMU_SURF2TEX_EXT. Default (neither set) is OFF, silently — the OFF path
+ * is byte-identical to the historical bind flow. */
+static bool surf2tex_ext_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_SURF2TEX_EXT")) {
+            state = 0;
+            if (getenv("XEMU_SURF2TEX_EXT")) {
+                fprintf(stderr,
+                        "nv2a: XEMU_NO_SURF2TEX_EXT overrides XEMU_SURF2TEX_EXT "
+                        "— extended surface-as-texture gather off\n");
+            }
+        } else {
+            state = getenv("XEMU_SURF2TEX_EXT") ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_EXT on — multi-surface gather GPU "
+                        "copy for surface-as-texture binds (replaces the "
+                        "download+rehash fallback where row-compatible)\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
+/* loc-graphics-research: XEMU_SURF2TEX_ZEROCOPY getenv-once gate. -1 =
+ * unprobed, 0 = off, 1 = on. XEMU_NO_SURF2TEX_ZEROCOPY wins. Default OFF —
+ * the OFF path is byte-identical to the historical copy flow. */
+static bool surf2tex_zerocopy_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_SURF2TEX_ZEROCOPY")) {
+            state = 0;
+        } else {
+            state = getenv("XEMU_SURF2TEX_ZEROCOPY") ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_ZEROCOPY on — exact-match "
+                        "surface-as-texture binds sample the surface image "
+                        "directly (no per-rebind copy)\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
+/* loc-graphics-research: XEMU_SURF2TEX_FEEDBACK getenv-once gate (v9).
+ * Requires XEMU_SURF2TEX_ZEROCOPY. Allows zero-copy sampling of the surface
+ * CURRENTLY bound as the render target — the Xbox feedback pattern behind
+ * Line of Contact's 3-4fps cockpit — via VK_IMAGE_LAYOUT_GENERAL and the
+ * color_general render-pass variant. XEMU_NO_SURF2TEX_FEEDBACK wins. */
+static bool surf2tex_feedback_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_SURF2TEX_FEEDBACK")) {
+            state = 0;
+        } else {
+            state = (getenv("XEMU_SURF2TEX_FEEDBACK") &&
+                     surf2tex_zerocopy_enabled()) ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_FEEDBACK on — still-bound render "
+                        "targets are sampled zero-copy in GENERAL layout (the "
+                        "cockpit feedback pattern)\n");
+            } else if (getenv("XEMU_SURF2TEX_FEEDBACK")) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_FEEDBACK ignored — requires "
+                        "XEMU_SURF2TEX_ZEROCOPY\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
+/* Ensure a borrowed surface is sampleable right now: non-feedback borrows
+ * rest in SHADER_READ_ONLY; feedback borrows rest in GENERAL and need a
+ * write->read visibility barrier for the draws just recorded. */
+static void surf2tex_zerocopy_ensure(PGRAPHState *pg, SurfaceBinding *surface)
+{
+    VkImageLayout want = surface->feedback_mode ?
+                             VK_IMAGE_LAYOUT_GENERAL :
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bool need_transition = surface->image_layout != want;
+    /* Flush once per REDRAW, not per bind: repeated binds without new writes
+     * need no new visibility barrier, and each nondraw block breaks the open
+     * render pass (per-bind flushing doubled the pass count). */
+    bool need_flush = surface->feedback_mode &&
+                      surface->flushed_draw_time != surface->draw_time;
+    if (!need_transition && !need_flush) {
+        return;
+    }
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    if (need_transition) {
+        pgraph_vk_surface_transition(pg, cmd, surface, want);
+    }
+    if (need_flush) {
+        pgraph_vk_surface_feedback_flush(pg, cmd, surface);
+        surface->flushed_draw_time = surface->draw_time;
+        nv2a_profile_inc_counter(NV2A_PROF_ZC_FLUSHES);
+    }
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+}
+
+/* loc-graphics-research: gather plan for the extended surface-as-texture path.
+ *
+ * The historical GPU copy path requires ONE resident surface whose base and
+ * shape exactly match the texture. Line of Contact's combat scene issues
+ * hundreds of surface-as-texture binds per frame that miss that test (surface
+ * evicted / base offset inside a larger framebuffer / tiled sub-surfaces /
+ * width-height mismatch) and each miss takes the fallback: a blocking GPU->CPU
+ * download of every dirty overlapping surface plus a full re-hash and CPU
+ * re-upload of the texture bytes (~600 downloads and ~177MB hashed per frame,
+ * ~750ms worst frames — the 4fps wall).
+ *
+ * The gather plan replaces that with row-aligned VkImageCopy regions taken
+ * directly from every overlapping resident color surface, entirely GPU-side:
+ * the texture is linear-addressed, so with equal row pitch and row-aligned
+ * base deltas the texel rows of the texture are exactly the texel rows of the
+ * surfaces that cover its VRAM range. Anything not row-representable (swizzled
+ * surface, pitch mismatch, non-row-aligned overlap, zeta) bails to the
+ * historical fallback untouched. */
+#define SURF2TEX_GATHER_MAX_REGIONS 16
+
+typedef struct Surf2TexGatherPlan {
+    int num_regions;
+    bool full_coverage;      /* gathered rows cover every texture row */
+    /* Dedup key: sum of gathered draw_times (mixed with region count).
+     * draw_time is per-surface monotonic, so the sum strictly changes when
+     * ANY gathered surface is redrawn — a max() key would miss a redraw of a
+     * lower-draw_time region while another region still holds the max. */
+    uint32_t draw_time_key;
+    struct {
+        SurfaceBinding *surface;
+        unsigned int src_y;  /* first row inside the surface image (unscaled) */
+        unsigned int dst_y;  /* first row inside the texture image (unscaled) */
+        unsigned int rows;
+        unsigned int width;
+    } regions[SURF2TEX_GATHER_MAX_REGIONS];
+} Surf2TexGatherPlan;
+
+/* Why a gather plan could not be built — ticked (storm-path only) into the
+ * S2T_REJ_* counters so the next extension is designed from data, not guesses. */
+typedef enum S2TGatherResult {
+    S2T_GATHER_OK = 0,
+    S2T_GATHER_REJ_TEXSHAPE,      /* texture shape outside row math (swizzled/
+                                     mips/cubemap/3D/no pitch/unsupported fmt) */
+    S2T_GATHER_REJ_SWIZSURF,      /* an overlapping surface is swizzled */
+    S2T_GATHER_REJ_PITCH,         /* overlapping surface pitch != texture pitch */
+    S2T_GATHER_REJ_BPP,           /* texel size mismatch */
+    S2T_GATHER_REJ_ALIGN,         /* overlap not row-aligned */
+    S2T_GATHER_REJ_OVERFLOW,      /* more overlapping surfaces than regions */
+    S2T_GATHER_REJ_NONE_RESIDENT, /* nothing resident overlaps the range */
+} S2TGatherResult;
+
+static S2TGatherResult build_surf2tex_gather_plan(NV2AState *d, hwaddr tex_base,
+                                                  const TextureShape *shape,
+                                                  Surf2TexGatherPlan *plan)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    BasicColorFormatInfo f_basic =
+        kelvin_color_format_info_map[shape->color_format];
+
+    /* Row math only holds for plain 2D single-level linear texture shapes. */
+    if (shape->levels != 1 || shape->cubemap || shape->dimensionality != 2 ||
+        !f_basic.linear || !shape->pitch) {
+        return S2T_GATHER_REJ_TEXSHAPE;
+    }
+
+    VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
+    unsigned int bpp = vk_format_texel_size(tex_vkf.vk_format);
+    if (!tex_vkf.vk_format || !bpp) {
+        return S2T_GATHER_REJ_TEXSHAPE;
+    }
+
+    unsigned int tex_rows = shape->height;
+    hwaddr tex_end = tex_base + (hwaddr)shape->pitch * tex_rows;
+
+    plan->num_regions = 0;
+    plan->draw_time_key = 0;
+    unsigned int covered_rows = 0;
+
+    SurfaceBinding *s;
+    QTAILQ_FOREACH(s, &r->surfaces, entry) {
+        hwaddr s_end = s->vram_addr + s->size;
+        if (s_end <= tex_base || s->vram_addr >= tex_end) {
+            continue; /* no overlap */
+        }
+        /* Every overlapping surface must be row-representable, else the
+         * fallback must handle the whole bind (it downloads ALL dirty
+         * overlaps — a partial gather would leave those rows stale). */
+        if (!s->color || s->swizzle) {
+            return S2T_GATHER_REJ_SWIZSURF;
+        }
+        if (s->pitch != shape->pitch) {
+            return S2T_GATHER_REJ_PITCH;
+        }
+        if (s->host_fmt.host_bytes_per_pixel != bpp) {
+            return S2T_GATHER_REJ_BPP;
+        }
+        hwaddr ovl_start = MAX(s->vram_addr, tex_base);
+        hwaddr ovl_end = MIN(s_end, tex_end);
+        if ((ovl_start - s->vram_addr) % s->pitch ||
+            (ovl_start - tex_base) % s->pitch) {
+            return S2T_GATHER_REJ_ALIGN; /* overlap not row-aligned */
+        }
+        unsigned int src_y = (ovl_start - s->vram_addr) / s->pitch;
+        unsigned int dst_y = (ovl_start - tex_base) / s->pitch;
+        unsigned int rows = (ovl_end - ovl_start) / s->pitch;
+        if (src_y < s->height && dst_y < tex_rows) {
+            rows = MIN(rows, s->height - src_y);
+            rows = MIN(rows, tex_rows - dst_y);
+        } else {
+            rows = 0;
+        }
+        if (!rows) {
+            continue;
+        }
+        if (plan->num_regions >= SURF2TEX_GATHER_MAX_REGIONS) {
+            return S2T_GATHER_REJ_OVERFLOW;
+        }
+        plan->regions[plan->num_regions].surface = s;
+        plan->regions[plan->num_regions].src_y = src_y;
+        plan->regions[plan->num_regions].dst_y = dst_y;
+        plan->regions[plan->num_regions].rows = rows;
+        plan->regions[plan->num_regions].width = MIN(s->width, shape->width);
+        plan->num_regions++;
+        covered_rows += rows;
+        plan->draw_time_key += (uint32_t)s->draw_time;
+    }
+
+    if (plan->num_regions == 0) {
+        return S2T_GATHER_REJ_NONE_RESIDENT;
+    }
+    /* Mix the region count in so a same-sum different-set plan re-keys. */
+    plan->draw_time_key = plan->draw_time_key * 31u +
+                          (uint32_t)plan->num_regions;
+    /* Resident surfaces never overlap each other (creation invalidates
+     * overlaps), so summed rows can't double-count. */
+    plan->full_coverage = covered_rows >= tex_rows;
+    return S2T_GATHER_OK;
+}
+
+/* loc-graphics-research: XEMU_SURF2TEX_DEBUG=1 — rate-limited geometry dump of
+ * surface-fed binds that still fall back after the gather attempt, so the next
+ * extension is designed against real shapes. Max ~20 lines / 5 s. */
+static void surf2tex_debug_dump_miss(NV2AState *d, hwaddr tex_base,
+                                     const TextureShape *shape,
+                                     SurfaceBinding *exact)
+{
+    static int gate = -1;
+    if (gate < 0) {
+        gate = getenv("XEMU_SURF2TEX_DEBUG") ? 1 : 0;
+    }
+    if (!gate) {
+        return;
+    }
+    static int64_t win_start;
+    static int win_count;
+    int64_t now = g_get_monotonic_time();
+    if (now - win_start > (int64_t)5 * G_USEC_PER_SEC) {
+        win_start = now;
+        win_count = 0;
+    }
+    if (win_count++ >= 20) {
+        return;
+    }
+    BasicColorFormatInfo fb = kelvin_color_format_info_map[shape->color_format];
+    fprintf(stderr,
+            "s2t-miss: tex=%08" HWADDR_PRIx " %ux%u pitch=%u fmt=%02x lin=%d "
+            "lvls=%d",
+            tex_base, shape->width, shape->height, shape->pitch,
+            shape->color_format, fb.linear, shape->levels);
+    SurfaceBinding *s = exact ? exact
+                              : pgraph_vk_surface_get_within(
+                                    d, tex_base);
+    if (s) {
+        fprintf(stderr,
+                " | surf=%08" HWADDR_PRIx " %ux%u pitch=%u swz=%d color=%d "
+                "bpp=%u\n",
+                s->vram_addr, s->width, s->height, s->pitch, s->swizzle,
+                s->color, s->host_fmt.host_bytes_per_pixel);
+    } else {
+        fprintf(stderr, " | surf=none-within\n");
+    }
+}
+
+static void copy_gather_plan_to_texture(PGRAPHState *pg,
+                                        Surf2TexGatherPlan *plan,
+                                        TextureBinding *texture, bool fresh)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    TextureShape *state = &texture->key.state;
+    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+    unsigned int scale = pg->surface_scale_factor;
+
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_COPY);
+    g_nv2a_stats.frame_working.counters[NV2A_PROF_S2T_EXT_REGIONS] +=
+        plan->num_regions;
+    if (!plan->full_coverage) {
+        nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_PARTIAL);
+    }
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    if (fresh && !plan->full_coverage) {
+        /* Fresh image with rows no resident surface covers: define them.
+         * (Real hardware would sample whatever bytes follow in VRAM; black is
+         * deterministic and the uncovered rows are not expected to be
+         * sampled.) On a reused binding the previous contents stay. */
+        VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
+        VkImageSubresourceRange range = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        };
+        vkCmdClearColorImage(cmd, texture->image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                             &range);
+    }
+
+    for (int i = 0; i < plan->num_regions; i++) {
+        SurfaceBinding *s = plan->regions[i].surface;
+
+        /* narrow-fence: the GPU reads this surface image here; eviction and
+         * overwrite must wait for the submission carrying that read (same
+         * bookkeeping as the exact-match copy path). */
+        s->last_use_submit = r->submit_count;
+
+        pgraph_vk_surface_transition(pg, cmd, s,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        VkImageCopy region = {
+            .srcSubresource.aspectMask = s->host_fmt.aspect,
+            .srcSubresource.layerCount = 1,
+            .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .dstSubresource.layerCount = 1,
+            .srcOffset.y = plan->regions[i].src_y * scale,
+            .dstOffset.y = plan->regions[i].dst_y * scale,
+            .extent.width = plan->regions[i].width,
+            .extent.height = plan->regions[i].rows,
+            .extent.depth = 1,
+        };
+        pgraph_apply_scaling_factor(pg, &region.extent.width,
+                                    &region.extent.height);
+
+        vkCmdCopyImage(cmd, s->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                       &region);
+
+        pgraph_vk_surface_transition(pg, cmd, s,
+                                     pgraph_vk_surface_rest_layout(s));
+    }
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    /* Bit-pattern equality is all the dedup needs; the key is not a real
+     * draw_time but reuses the field so the exact-match path's semantics
+     * (fresh binding never matches) hold unchanged. */
+    texture->draw_time = (int)plan->draw_time_key;
+}
+
+/* loc-graphics-research helpers for the two same-base swizzled-texture paths
+ * (XEMU_SURF2TEX_EXT). Line of Contact's shadow pipeline drives both:
+ *
+ *  QUADRANT — a square pow2 swizzled texture over a LARGER square pow2
+ *  swizzled surface at the same base. Morton order nests: the first w*h texels
+ *  of the larger Morton square are exactly its top-left w x h block in the
+ *  smaller square's Morton order, and both images are stored deswizzled — so
+ *  the texture content is precisely the surface's top-left w x h rect.
+ *
+ *  BOUNCE — a square pow2 swizzled 4-bpp texture over a LINEAR surface at the
+ *  same base (LoC: a 256x256 swizzled A8R8G8B8 texture sampling the 1800x1800
+ *  linear D16 shadow map ~600x/frame — the 4fps storm). Replicates the CPU
+ *  fallback byte-for-byte, GPU-side: surface image -> raw byte stream in
+ *  BUFFER_COMPUTE_DST (vkCmdCopyImageToBuffer at the surface's row pitch,
+ *  gap bytes zero-filled) -> Morton deswizzle compute into BUFFER_COMPUTE_SRC
+ *  -> vkCmdCopyBufferToImage into the texture image. No CPU round-trip, no
+ *  hash, no guest-RAM touch.
+ */
+static bool is_pow2_square(unsigned int w, unsigned int h)
+{
+    return w == h && w != 0 && (w & (w - 1)) == 0;
+}
+
+/* Any OTHER resident surface overlapping [base, base+len) would contribute
+ * bytes the single-source paths cannot see — bail to the fallback there.
+ * Freshness rule (alias tolerance): a surface drawn no later than `self`
+ * cannot hold newer content for the range — `self`'s own draw covered its
+ * whole range afterwards — so stale alias PARENTS (XEMU_ALIAS_SURFACES keeps
+ * the big shadow-map zeta resident under its child blocks) are ignored, while
+ * a FRESHER overlapping sibling still forces the fallback. */
+static bool other_surface_overlaps_range(PGRAPHVkState *r,
+                                         const SurfaceBinding *self,
+                                         hwaddr base, size_t len)
+{
+    SurfaceBinding *s;
+    QTAILQ_FOREACH(s, &r->surfaces, entry) {
+        if (s == self) {
+            continue;
+        }
+        if (s->draw_time <= self->draw_time) {
+            continue;
+        }
+        if (s->vram_addr + s->size > base && s->vram_addr < base + len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void copy_swizzled_quadrant_to_texture(PGRAPHState *pg,
+                                              SurfaceBinding *surface,
+                                              TextureBinding *texture)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    TextureShape *state = &texture->key.state;
+    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_COPY);
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_QUAD);
+
+    surface->last_use_submit = r->submit_count;
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
+
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkImageCopy region = {
+        .srcSubresource.aspectMask = surface->host_fmt.aspect,
+        .srcSubresource.layerCount = 1,
+        .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .dstSubresource.layerCount = 1,
+        .extent.width = state->width,
+        .extent.height = state->height,
+        .extent.depth = 1,
+    };
+    pgraph_apply_scaling_factor(pg, &region.extent.width,
+                                &region.extent.height);
+    vkCmdCopyImage(cmd, surface->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                   &region);
+
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    texture->draw_time = surface->draw_time;
+}
+
+static void bounce_linear_surface_to_swizzled_texture(PGRAPHState *pg,
+                                                      SurfaceBinding *surface,
+                                                      TextureBinding *texture,
+                                                      hwaddr tex_base)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    TextureShape *state = &texture->key.state;
+    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+
+    unsigned int surf_bpp = surface->host_fmt.host_bytes_per_pixel;
+    size_t tex_len = (size_t)state->width * state->height * 4;
+    /* The texture may start inside the surface (LoC: swizzled sub-blocks at
+     * word-aligned offsets in the shadow map). Copy whole surface rows
+     * [first_row, end_row) into the buffer and bias the compute's source
+     * index by the intra-row byte remainder (word-aligned, precondition). */
+    hwaddr delta = tex_base - surface->vram_addr;
+    unsigned int first_row = delta / surface->pitch;
+    unsigned int rem_bytes = delta % surface->pitch;
+    unsigned int end_row =
+        DIV_ROUND_UP(delta + tex_len, (size_t)surface->pitch);
+    unsigned int rows = end_row - first_row;
+    size_t fill_len = (size_t)rows * surface->pitch;
+
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_COPY);
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_BOUNCE);
+
+    surface->last_use_submit = r->submit_count;
+
+    VkBuffer in_buf = r->storage_buffers[BUFFER_COMPUTE_DST].buffer;
+    VkBuffer out_buf = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
+
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    /* Guard against the PREVIOUS bounce still using these buffers (compute
+     * read of in_buf, transfer read of out_buf) before we overwrite them. */
+    VkBufferMemoryBarrier reuse_barriers[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                             VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = in_buf,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
+                             VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = out_buf,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+    };
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, NULL, 2, reuse_barriers, 0, NULL);
+
+    /* Zero the row-pitch gap bytes the image does not cover (surface width *
+     * bpp < pitch). Real hardware would read whatever stale bytes sit there;
+     * zero is deterministic and those texels land in unsampled padding. */
+    vkCmdFillBuffer(cmd, in_buf, 0, fill_len, 0);
+    VkBufferMemoryBarrier fill_barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = in_buf,
+        .offset = 0,
+        .size = fill_len,
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                         &fill_barrier, 0, NULL);
+
+    VkBufferImageCopy to_buf = {
+        .bufferOffset = 0,
+        .bufferRowLength = surface->pitch / surf_bpp,
+        .bufferImageHeight = 0,
+        .imageSubresource.aspectMask = surface->host_fmt.aspect,
+        .imageSubresource.layerCount = 1,
+        .imageOffset.y = first_row,
+        .imageExtent.width = surface->width,
+        .imageExtent.height = MIN(rows, surface->height - first_row),
+        .imageExtent.depth = 1,
+    };
+    vkCmdCopyImageToBuffer(cmd, surface->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, in_buf, 1,
+                           &to_buf);
+
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
+
+    VkBufferMemoryBarrier pre_compute = fill_barrier;
+    pre_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    pre_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
+                         &pre_compute, 0, NULL);
+
+    pgraph_vk_dispatch_deswizzle_u32(pg, cmd, state->width, state->height,
+                                     rem_bytes / 4);
+
+    VkBufferMemoryBarrier post_compute = fill_barrier;
+    post_compute.buffer = out_buf;
+    post_compute.size = tex_len;
+    post_compute.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    post_compute.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                         &post_compute, 0, NULL);
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkBufferImageCopy to_img = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0, /* tightly packed */
+        .bufferImageHeight = 0,
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.layerCount = 1,
+        .imageExtent.width = state->width,
+        .imageExtent.height = state->height,
+        .imageExtent.depth = 1,
+    };
+    vkCmdCopyBufferToImage(cmd, out_buf, texture->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &to_img);
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    texture->draw_time = surface->draw_time;
 }
 
 static void create_dummy_texture(PGRAPHState *pg)
@@ -1405,6 +2055,11 @@ static void set_texture_label(PGRAPHState *pg, TextureBinding *texture)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /* Zero-copy nodes own no image/allocation to label. */
+    if (texture->borrowed) {
+        return;
+    }
+
     g_autofree gchar *label = g_strdup_printf(
         "Texture %" HWADDR_PRIx "h fmt:%02xh %dx%dx%d lvls:%d",
         texture->key.texture_vram_offset, texture->key.state.color_format,
@@ -1482,19 +2137,153 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     bool surface_to_texture = false;
 
     // Check active surfaces to see if this texture was a render target
+    Surf2TexGatherPlan s2t_plan = { .num_regions = 0 };
+    bool s2t_plan_valid = false;
+    /* loc-graphics-research: attribute WHY a surface-fed bind missed the GPU
+     * copy path. Default reason NOSURF; refined below. Only ticked when the
+     * fallback actually downloads (forced > 0), so plain texture binds that
+     * overlap nothing dirty never count. */
+    enum NV2A_PROF_COUNTERS_ENUM s2t_miss_counter = NV2A_PROF_S2T_MISS_NOSURF;
     SurfaceBinding *surface = pgraph_vk_surface_get(d, texture_vram_offset);
     if (surface && state.levels == 1) {
-        surface_to_texture =
-            check_surface_to_texture_compatiblity(surface, &state);
+        S2TCompat compat = surface_to_texture_compat_reason(surface, &state);
+        surface_to_texture = (compat == S2T_COMPAT_OK);
 
         if (!surface_to_texture && surface->color) {
             trace_nv2a_pgraph_surface_texture_compat_failed(
                 surface->shape.color_format,
                 state.color_format);
         }
+        switch (compat) {
+        case S2T_COMPAT_PITCH:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_PITCH;
+            break;
+        case S2T_COMPAT_DIMS:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_DIMS;
+            break;
+        case S2T_COMPAT_CUBEMAP:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_CUBEMAP;
+            break;
+        case S2T_COMPAT_MIPS:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_MIPS;
+            break;
+        case S2T_COMPAT_FORMAT:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_FORMAT;
+            break;
+        default:
+            break;
+        }
 
         if (surface_to_texture && surface->upload_pending) {
             pgraph_vk_upload_surface_data(d, surface, false);
+        }
+
+        /* Alias mode: the newest surface at this base may be a small alias
+         * child; a compatible same-base parent (the shadow-map zeta under
+         * its color block) can serve the bind on the historical exact path. */
+        if (!surface_to_texture && pgraph_vk_alias_surfaces_enabled()) {
+            PGRAPHVkState *r_ = pg->vk_renderer_state;
+            SurfaceBinding *deeper;
+            QTAILQ_FOREACH(deeper, &r_->surfaces, entry) {
+                if (deeper != surface &&
+                    deeper->vram_addr == texture_vram_offset &&
+                    check_surface_to_texture_compatiblity(deeper, &state)) {
+                    surface = deeper;
+                    surface_to_texture = true;
+                    if (surface->upload_pending) {
+                        pgraph_vk_upload_surface_data(d, surface, false);
+                    }
+                    break;
+                }
+            }
+        }
+    } else if (surface) {
+        s2t_miss_counter = NV2A_PROF_S2T_MISS_MIPS; /* levels > 1 gate */
+    }
+
+    /* loc-graphics-research: extended surface-as-texture paths
+     * (XEMU_SURF2TEX_EXT). Where the exact-match test failed, try in order:
+     * QUADRANT (swizzled tex over larger swizzled surface, same base),
+     * BOUNCE (swizzled tex over linear surface, same base — LoC's shadow-map
+     * storm), GATHER (row-aligned copies from overlapping linear surfaces).
+     * All fully GPU-side, replacing the download+rehash fallback below. */
+    enum {
+        S2T_PATH_NONE = 0,
+        S2T_PATH_GATHER,
+        S2T_PATH_QUAD,
+        S2T_PATH_BOUNCE,
+    } s2t_path = S2T_PATH_NONE;
+    SurfaceBinding *s2t_surface = NULL;
+    S2TGatherResult s2t_rej = S2T_GATHER_REJ_NONE_RESIDENT;
+    if (!surface_to_texture && surf2tex_ext_enabled()) {
+        PGRAPHVkState *r_ = pg->vk_renderer_state;
+        VkColorFormatInfo tex_vkf =
+            kelvin_color_format_vk_map[state.color_format];
+        unsigned int tex_bpp = vk_format_texel_size(tex_vkf.vk_format);
+        BasicColorFormatInfo tex_basic =
+            kelvin_color_format_info_map[state.color_format];
+        size_t tex_len = (size_t)state.width * state.height * tex_bpp;
+
+        /* The texture base may sit at an exact surface base (surface) or
+         * inside a larger one (WITHIN — LoC's swizzled sub-blocks in the
+         * shadow map's footprint). */
+        SurfaceBinding *host =
+            surface ? surface :
+                      pgraph_vk_surface_get_within(d, texture_vram_offset);
+
+        if (host && state.levels == 1 && !tex_basic.linear &&
+            state.dimensionality == 2 && !state.cubemap &&
+            tex_vkf.vk_format && tex_bpp) {
+            hwaddr delta = texture_vram_offset - host->vram_addr;
+            if (host == surface && host->swizzle && host->color &&
+                is_pow2_square(state.width, state.height) &&
+                is_pow2_square(host->width, host->height) &&
+                host->width >= state.width &&
+                host->host_fmt.host_bytes_per_pixel == tex_bpp &&
+                !other_surface_overlaps_range(r_, host,
+                                              texture_vram_offset, tex_len)) {
+                s2t_path = S2T_PATH_QUAD;
+            } else if (!host->swizzle && tex_bpp == 4 &&
+                       is_pow2_square(state.width, state.height) &&
+                       pg->surface_scale_factor == 1 &&
+                       host->host_fmt.vk_format !=
+                           VK_FORMAT_D24_UNORM_S8_UINT &&
+                       host->host_fmt.vk_format !=
+                           VK_FORMAT_D32_SFLOAT_S8_UINT &&
+                       host->pitch != 0 &&
+                       (host->pitch %
+                        host->host_fmt.host_bytes_per_pixel) == 0 &&
+                       (delta % 4) == 0 &&
+                       DIV_ROUND_UP(delta + tex_len, (size_t)host->pitch) <=
+                           host->height &&
+                       !pgraph_vk_compute_needs_finish(r_) &&
+                       !other_surface_overlaps_range(r_, host,
+                                                     texture_vram_offset,
+                                                     tex_len)) {
+                s2t_path = S2T_PATH_BOUNCE;
+            }
+        }
+
+        if (s2t_path != S2T_PATH_NONE) {
+            s2t_surface = host;
+            if (s2t_surface->upload_pending) {
+                pgraph_vk_upload_surface_data(d, s2t_surface, false);
+            }
+            surface_to_texture = true;
+        } else {
+            s2t_rej = build_surf2tex_gather_plan(d, texture_vram_offset,
+                                                 &state, &s2t_plan);
+            if (s2t_rej == S2T_GATHER_OK) {
+                s2t_path = S2T_PATH_GATHER;
+                s2t_plan_valid = true;
+                surface_to_texture = true;
+                for (int i = 0; i < s2t_plan.num_regions; i++) {
+                    SurfaceBinding *s = s2t_plan.regions[i].surface;
+                    if (s->upload_pending) {
+                        pgraph_vk_upload_surface_data(d, s, false);
+                    }
+                }
+            }
         }
     }
 
@@ -1514,6 +2303,30 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
          * not count. */
         if (forced > 0) {
             nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX_FALLBACK);
+            /* Refine NOSURF → WITHIN only on the storm path (forced>0), so
+             * the common plain-texture bind never pays the list walk. */
+            if (s2t_miss_counter == NV2A_PROF_S2T_MISS_NOSURF &&
+                pgraph_vk_surface_get_within(d, texture_vram_offset)) {
+                s2t_miss_counter = NV2A_PROF_S2T_MISS_WITHIN;
+            }
+            nv2a_profile_inc_counter(s2t_miss_counter);
+            /* Gather-rejection breakdown + geometry dump (EXT runs only) —
+             * why the gather could not take this bind either. */
+            if (surf2tex_ext_enabled() && s2t_rej != S2T_GATHER_OK) {
+                static const enum NV2A_PROF_COUNTERS_ENUM rej_counter[] = {
+                    [S2T_GATHER_REJ_TEXSHAPE] = NV2A_PROF_S2T_REJ_TEXSHAPE,
+                    [S2T_GATHER_REJ_SWIZSURF] = NV2A_PROF_S2T_REJ_SWIZSURF,
+                    [S2T_GATHER_REJ_PITCH] = NV2A_PROF_S2T_REJ_PITCH,
+                    [S2T_GATHER_REJ_BPP] = NV2A_PROF_S2T_REJ_BPP,
+                    [S2T_GATHER_REJ_ALIGN] = NV2A_PROF_S2T_REJ_ALIGN,
+                    [S2T_GATHER_REJ_OVERFLOW] = NV2A_PROF_S2T_REJ_OVERFLOW,
+                    [S2T_GATHER_REJ_NONE_RESIDENT] =
+                        NV2A_PROF_S2T_REJ_NONE_RESIDENT,
+                };
+                nv2a_profile_inc_counter(rej_counter[s2t_rej]);
+                surf2tex_debug_dump_miss(d, texture_vram_offset, &state,
+                                         surface);
+            }
         }
     }
 
@@ -1521,10 +2334,84 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         key.scale = pg->surface_scale_factor;
     }
 
+    /* loc-graphics-research (XEMU_SURF2TEX_ZEROCOPY): eligibility — the
+     * exact-match surface path only, color surfaces, identical VkFormat (no
+     * MUTABLE_FORMAT on surface images), and never the CURRENT render target
+     * (sampling a bound attachment is illegal; those binds keep the copy
+     * path). Component swizzles come from the texture format's component_map
+     * on the view, which is always legal. */
+    bool s2t_zerocopy = false;
+    bool s2t_feedback = false;
+    /* v9.4 CORRECTNESS REVERT: depth surfaces must NOT be borrowed.
+     *
+     * v9.3 sampled the D16 zeta directly through a depth-aspect view, on the
+     * theory that it was bit-identical to the Y16 the conversion produced.
+     * That was WRONG and caused visibly bad shadow pixels (owner-reported):
+     * Line of Contact binds its shadow map as LU_IMAGE_DEPTH_Y16_FLOAT (0x31,
+     * a `depth` format in kelvin_color_format_info_map). The historical path
+     * copies the RAW 16-bit bits into a Y16-format texture and lets the
+     * fragment shader apply the Xbox float-depth decode. A D16_UNORM depth
+     * view instead makes the SAMPLER pre-normalize to [0,1], and the shader
+     * then decodes again — a double decode feeding wrong values into the
+     * shadow comparison.
+     *
+     * Depth-as-texture keeps the converting copy path; the per-frame copy
+     * dedup below recovers the speed soundly. */
+    if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        surf2tex_zerocopy_enabled() && surface != NULL && !surface->color) {
+        nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_ZETA_SURF);
+    }
+    if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        !s2t_zerocopy && surf2tex_zerocopy_enabled() && surface != NULL &&
+        surface->color &&
+        (state.levels != 1 || state.cubemap || state.dimensionality != 2)) {
+        nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_SHAPE);
+    }
+    if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        !s2t_zerocopy &&
+        surf2tex_zerocopy_enabled() && surface != NULL && surface->color &&
+        state.levels == 1 && !state.cubemap && state.dimensionality == 2 &&
+        surface != r->zeta_binding) {
+        bool is_bound_target = (surface == r->color_binding);
+        if (!is_bound_target || surf2tex_feedback_enabled()) {
+            VkColorFormatInfo zc_vkf =
+                kelvin_color_format_vk_map[state.color_format];
+            if (zc_vkf.vk_format != surface->host_fmt.vk_format) {
+                nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_FMT);
+            }
+            if (zc_vkf.vk_format == surface->host_fmt.vk_format) {
+                s2t_zerocopy = true;
+                if (is_bound_target && !surface->feedback_mode) {
+                    /* First feedback bind of this surface: sticky-mark it
+                     * (GENERAL rest + color_general pass variant from here)
+                     * and fence every existing borrow — their descriptor
+                     * layouts are now stale. */
+                    surface->feedback_mode = true;
+                    r->surface_generation++;
+                }
+                s2t_feedback = surface->feedback_mode;
+            }
+        }
+    }
+
     uint64_t key_hash = fast_hash((void*)&key, sizeof(key));
     LruNode *node = lru_lookup(&r->texture_cache, key_hash, &key);
     TextureBinding *snode = container_of(node, TextureBinding, node);
-    bool binding_found = snode->image != VK_NULL_HANDLE;
+    bool binding_found = snode->image != VK_NULL_HANDLE || snode->borrowed;
+
+    /* Borrowed staleness gate: rebuild when any surface was invalidated since
+     * the borrow, the surface image changed, or this bind is no longer
+     * zero-copy eligible (e.g. the surface became the render target). Also
+     * migrate an OWNED node to borrowed when the bind is eligible — else
+     * warm-cache nodes would keep copying forever. */
+    if (binding_found &&
+        ((snode->borrowed &&
+          (!s2t_zerocopy || snode->borrow_gen != r->surface_generation ||
+           snode->borrow_image != surface->image)) ||
+         (!snode->borrowed && s2t_zerocopy))) {
+        texture_cache_release_node_resources(r, snode);
+        binding_found = false;
+    }
 
     if (binding_found) {
         NV2A_VK_DPRINTF("Cache hit");
@@ -1568,7 +2455,41 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     if (binding_found) {
         if (surface_to_texture) {
             // FIXME: Add draw time tracking
-            if (surface->draw_time != snode->draw_time) {
+            if (snode->borrowed) {
+                /* Zero-copy: no content work — the view sees live surface
+                 * content. Ensure a sampleable layout (+ feedback flush) and
+                 * stamp the read for the eviction gate. */
+                surf2tex_zerocopy_ensure(pg, surface);
+                surface->last_use_submit = r->submit_count;
+            } else if (s2t_plan_valid) {
+                /* Gather dedup: re-copy only when any gathered surface was
+                 * redrawn since this binding last consumed it. */
+                if ((int)s2t_plan.draw_time_key != snode->draw_time) {
+                    copy_gather_plan_to_texture(pg, &s2t_plan, snode, false);
+                }
+            } else if (s2t_path == S2T_PATH_QUAD) {
+                if (s2t_surface->draw_time != snode->draw_time) {
+                    copy_swizzled_quadrant_to_texture(pg, s2t_surface, snode);
+                }
+            } else if (s2t_path == S2T_PATH_BOUNCE) {
+                if (s2t_surface->draw_time != snode->draw_time) {
+                    bounce_linear_surface_to_swizzled_texture(
+                        pg, s2t_surface, snode, texture_vram_offset);
+                }
+            } else if (!surface->color && surf2tex_feedback_enabled()) {
+                /* v9.4: depth-as-texture — the converting copy stays (see the
+                 * revert above), but run it ONCE PER FRAME rather than once
+                 * per bind. draw_time advances with every particle draw, so
+                 * the old key re-converted the whole shadow map ~700x/frame;
+                 * the depth being sampled is the finished opaque scene, so a
+                 * single snapshot per frame is what the effect actually
+                 * wants. */
+                if (snode->copied_frame_time != surface->frame_time) {
+                    copy_surface_to_texture(pg, surface, snode);
+                    snode->copied_frame_time = surface->frame_time;
+                    snode->draw_time = surface->draw_time;
+                }
+            } else if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
         } else {
@@ -1615,6 +2536,9 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     snode->possibly_dirty = false;
     snode->hash = content_hash;
+    snode->borrowed = false; /* set below on the zero-copy build */
+    snode->copied_frame_time = -1;
+    snode->descriptor_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
     assert(vkf.vk_format != 0);
@@ -1645,26 +2569,44 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                         &image_create_info.extent.height);
     }
 
-    VmaAllocationCreateInfo alloc_create_info = {
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-    };
+    if (s2t_zerocopy) {
+        /* Zero-copy: no owned image — the view below targets the surface's
+         * image (same VkFormat; component swizzle applied on the view). */
+        snode->image = VK_NULL_HANDLE;
+        snode->allocation = VK_NULL_HANDLE;
+        snode->borrowed = true;
+        snode->borrow_gen = r->surface_generation;
+        snode->borrow_image = surface->image;
+        snode->borrow_surface = surface;
+        snode->descriptor_layout =
+            s2t_feedback ? VK_IMAGE_LAYOUT_GENERAL :
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    } else {
+        VmaAllocationCreateInfo alloc_create_info = {
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        };
 
-    VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
-                            &alloc_create_info, &snode->image,
-                            &snode->allocation, NULL));
+        VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                                &alloc_create_info, &snode->image,
+                                &snode->allocation, NULL));
+    }
 
+    /* Borrows are color-only (see the v9.4 revert above), so the view always
+     * uses the texture's own format and the color aspect. */
     VkImageViewCreateInfo image_view_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = snode->image,
+        .image = s2t_zerocopy ? surface->image : snode->image,
         .viewType = state.cubemap ?
             VK_IMAGE_VIEW_TYPE_CUBE :
             dimensionality_to_vk_image_view_type[state.dimensionality],
         .format = vkf.vk_format,
         .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .subresourceRange.baseMipLevel = 0,
-        .subresourceRange.levelCount = image_create_info.mipLevels,
+        .subresourceRange.levelCount =
+            s2t_zerocopy ? 1 : image_create_info.mipLevels,
         .subresourceRange.baseArrayLayer = 0,
-        .subresourceRange.layerCount = image_create_info.arrayLayers,
+        .subresourceRange.layerCount =
+            s2t_zerocopy ? 1 : image_create_info.arrayLayers,
         .components = vkf.component_map,
     };
 
@@ -1792,7 +2734,25 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     r->texture_bindings[texture_idx] = snode;
 
     if (surface_to_texture) {
-        copy_surface_to_texture(pg, surface, snode);
+        if (s2t_zerocopy) {
+            /* Zero-copy: no content work; ensure a sampleable layout (+
+             * feedback flush) and stamp the read for the eviction gate. */
+            surf2tex_zerocopy_ensure(pg, surface);
+            surface->last_use_submit = r->submit_count;
+            snode->current_layout = snode->descriptor_layout;
+            snode->draw_time = surface->draw_time;
+        } else if (s2t_plan_valid) {
+            copy_gather_plan_to_texture(pg, &s2t_plan, snode,
+                                        true /* fresh image */);
+        } else if (s2t_path == S2T_PATH_QUAD) {
+            copy_swizzled_quadrant_to_texture(pg, s2t_surface, snode);
+        } else if (s2t_path == S2T_PATH_BOUNCE) {
+            bounce_linear_surface_to_swizzled_texture(pg, s2t_surface, snode,
+                                                      texture_vram_offset);
+        } else {
+            copy_surface_to_texture(pg, surface, snode);
+            snode->copied_frame_time = surface->frame_time;
+        }
     } else {
         upload_texture_image(pg, texture_idx, snode,
                              false /* fresh image, first fill */);
@@ -1834,6 +2794,30 @@ void pgraph_vk_bind_textures(NV2AState *d)
     // FIXME: Mark textures that are sourced from surfaces so we can track them
 
     r->texture_bindings_changed = false;
+
+    /* loc-graphics-research (zero-copy): the not-dirty early-out below can
+     * reuse borrowed bindings without running create_texture — after a redraw
+     * restored the sampled surface to ATTACHMENT. Ensure sampleable layouts
+     * for live borrows, and force-rebuild stale ones (their surface was
+     * invalidated; the view must not be sampled again). */
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        TextureBinding *b = r->texture_bindings[i];
+        if (!b || !b->borrowed) {
+            continue;
+        }
+        if (b->borrow_gen != r->surface_generation) {
+            pg->texture_dirty[i] = true; /* stale borrow — rebuild this bind */
+            continue;
+        }
+        SurfaceBinding *bs = b->borrow_surface;
+        VkImageLayout bs_want = bs->feedback_mode ?
+                                    VK_IMAGE_LAYOUT_GENERAL :
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (bs->image_layout != bs_want || bs->feedback_mode) {
+            surf2tex_zerocopy_ensure(pg, bs);
+            bs->last_use_submit = r->submit_count;
+        }
+    }
 
     if (!check_textures_dirty(pg)) {
         NV2A_VK_DPRINTF("Not dirty");
@@ -1881,6 +2865,15 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
 
     vkDestroyImageView(r->device, snode->image_view, NULL);
     snode->image_view = VK_NULL_HANDLE;
+
+    /* loc-graphics-research (zero-copy): a borrowed node's view targets a
+     * SURFACE's image — the node owns only its view+sampler. */
+    if (snode->borrowed) {
+        snode->borrowed = false;
+        snode->borrow_image = VK_NULL_HANDLE;
+        assert(snode->image == VK_NULL_HANDLE);
+        return;
+    }
 
     vmaDestroyImage(r->allocator, snode->image, snode->allocation);
     snode->image = VK_NULL_HANDLE;
