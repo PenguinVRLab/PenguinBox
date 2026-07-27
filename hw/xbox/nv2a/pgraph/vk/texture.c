@@ -1034,24 +1034,527 @@ static unsigned int vk_format_texel_size(VkFormat format)
     }
 }
 
-static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
+typedef enum S2TCompat {
+    S2T_COMPAT_OK = 0,
+    S2T_COMPAT_PITCH,
+    S2T_COMPAT_DIMS,
+    S2T_COMPAT_CUBEMAP,
+    S2T_COMPAT_MIPS,
+    S2T_COMPAT_FORMAT,
+} S2TCompat;
+
+static S2TCompat surface_to_texture_compat_reason(const SurfaceBinding *surface,
                                                   const TextureShape *shape)
 {
-    if ((!surface->swizzle && surface->pitch != shape->pitch) ||
-        surface->width != shape->width ||
-        surface->height != shape->height ||
-        shape->cubemap ||
-        shape->levels > 1) {
-        return false;
+    if (!surface->swizzle && surface->pitch != shape->pitch) {
+        return S2T_COMPAT_PITCH;
+    }
+    if (surface->width != shape->width || surface->height != shape->height) {
+        return S2T_COMPAT_DIMS;
+    }
+    if (shape->cubemap) {
+        return S2T_COMPAT_CUBEMAP;
+    }
+    if (shape->levels > 1) {
+        return S2T_COMPAT_MIPS;
     }
 
     if (!surface->color) {
-        return true;
+        return S2T_COMPAT_OK;
     }
 
     VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
-    return tex_vkf.vk_format &&
-           surface->host_fmt.host_bytes_per_pixel == vk_format_texel_size(tex_vkf.vk_format);
+    if (!(tex_vkf.vk_format && surface->host_fmt.host_bytes_per_pixel ==
+                                   vk_format_texel_size(tex_vkf.vk_format))) {
+        return S2T_COMPAT_FORMAT;
+    }
+    return S2T_COMPAT_OK;
+}
+
+static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
+                                                  const TextureShape *shape)
+{
+    return surface_to_texture_compat_reason(surface, shape) == S2T_COMPAT_OK;
+}
+
+static bool surf2tex_ext_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_SURF2TEX_EXT")) {
+            state = 0;
+            if (getenv("XEMU_SURF2TEX_EXT")) {
+                fprintf(stderr,
+                        "nv2a: XEMU_NO_SURF2TEX_EXT overrides XEMU_SURF2TEX_EXT "
+                        "— extended surface-as-texture gather off\n");
+            }
+        } else {
+            state = getenv("XEMU_SURF2TEX_EXT") ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_EXT on — multi-surface gather GPU "
+                        "copy for surface-as-texture binds (replaces the "
+                        "download+rehash fallback where row-compatible)\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
+#define SURF2TEX_GATHER_MAX_REGIONS 16
+
+typedef struct Surf2TexGatherPlan {
+    int num_regions;
+    bool full_coverage;
+    uint32_t draw_time_key;
+    struct {
+        SurfaceBinding *surface;
+        unsigned int src_y;
+        unsigned int dst_y;
+        unsigned int rows;
+        unsigned int width;
+    } regions[SURF2TEX_GATHER_MAX_REGIONS];
+} Surf2TexGatherPlan;
+
+typedef enum S2TGatherResult {
+    S2T_GATHER_OK = 0,
+    S2T_GATHER_REJ_TEXSHAPE,
+    S2T_GATHER_REJ_SWIZSURF,
+    S2T_GATHER_REJ_PITCH,
+    S2T_GATHER_REJ_BPP,
+    S2T_GATHER_REJ_ALIGN,
+    S2T_GATHER_REJ_OVERFLOW,
+    S2T_GATHER_REJ_NONE_RESIDENT,
+} S2TGatherResult;
+
+static S2TGatherResult build_surf2tex_gather_plan(NV2AState *d, hwaddr tex_base,
+                                                  const TextureShape *shape,
+                                                  Surf2TexGatherPlan *plan)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    BasicColorFormatInfo f_basic =
+        kelvin_color_format_info_map[shape->color_format];
+
+    if (shape->levels != 1 || shape->cubemap || shape->dimensionality != 2 ||
+        !f_basic.linear || !shape->pitch) {
+        return S2T_GATHER_REJ_TEXSHAPE;
+    }
+
+    VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
+    unsigned int bpp = vk_format_texel_size(tex_vkf.vk_format);
+    if (!tex_vkf.vk_format || !bpp) {
+        return S2T_GATHER_REJ_TEXSHAPE;
+    }
+
+    unsigned int tex_rows = shape->height;
+    hwaddr tex_end = tex_base + (hwaddr)shape->pitch * tex_rows;
+
+    plan->num_regions = 0;
+    plan->draw_time_key = 0;
+    unsigned int covered_rows = 0;
+
+    SurfaceBinding *s;
+    QTAILQ_FOREACH(s, &r->surfaces, entry) {
+        hwaddr s_end = s->vram_addr + s->size;
+        if (s_end <= tex_base || s->vram_addr >= tex_end) {
+            continue;
+        }
+        if (!s->color || s->swizzle) {
+            return S2T_GATHER_REJ_SWIZSURF;
+        }
+        if (s->pitch != shape->pitch) {
+            return S2T_GATHER_REJ_PITCH;
+        }
+        if (s->host_fmt.host_bytes_per_pixel != bpp) {
+            return S2T_GATHER_REJ_BPP;
+        }
+        hwaddr ovl_start = MAX(s->vram_addr, tex_base);
+        hwaddr ovl_end = MIN(s_end, tex_end);
+        if ((ovl_start - s->vram_addr) % s->pitch ||
+            (ovl_start - tex_base) % s->pitch) {
+            return S2T_GATHER_REJ_ALIGN;
+        }
+        unsigned int src_y = (ovl_start - s->vram_addr) / s->pitch;
+        unsigned int dst_y = (ovl_start - tex_base) / s->pitch;
+        unsigned int rows = (ovl_end - ovl_start) / s->pitch;
+        if (src_y < s->height && dst_y < tex_rows) {
+            rows = MIN(rows, s->height - src_y);
+            rows = MIN(rows, tex_rows - dst_y);
+        } else {
+            rows = 0;
+        }
+        if (!rows) {
+            continue;
+        }
+        if (plan->num_regions >= SURF2TEX_GATHER_MAX_REGIONS) {
+            return S2T_GATHER_REJ_OVERFLOW;
+        }
+        plan->regions[plan->num_regions].surface = s;
+        plan->regions[plan->num_regions].src_y = src_y;
+        plan->regions[plan->num_regions].dst_y = dst_y;
+        plan->regions[plan->num_regions].rows = rows;
+        plan->regions[plan->num_regions].width = MIN(s->width, shape->width);
+        plan->num_regions++;
+        covered_rows += rows;
+        plan->draw_time_key += (uint32_t)s->draw_time;
+    }
+
+    if (plan->num_regions == 0) {
+        return S2T_GATHER_REJ_NONE_RESIDENT;
+    }
+    plan->draw_time_key = plan->draw_time_key * 31u +
+                          (uint32_t)plan->num_regions;
+    plan->full_coverage = covered_rows >= tex_rows;
+    return S2T_GATHER_OK;
+}
+
+static void surf2tex_debug_dump_miss(NV2AState *d, hwaddr tex_base,
+                                     const TextureShape *shape,
+                                     SurfaceBinding *exact)
+{
+    static int gate = -1;
+    if (gate < 0) {
+        gate = getenv("XEMU_SURF2TEX_DEBUG") ? 1 : 0;
+    }
+    if (!gate) {
+        return;
+    }
+    static int64_t win_start;
+    static int win_count;
+    int64_t now = g_get_monotonic_time();
+    if (now - win_start > (int64_t)5 * G_USEC_PER_SEC) {
+        win_start = now;
+        win_count = 0;
+    }
+    if (win_count++ >= 20) {
+        return;
+    }
+    BasicColorFormatInfo fb = kelvin_color_format_info_map[shape->color_format];
+    fprintf(stderr,
+            "s2t-miss: tex=%08" HWADDR_PRIx " %ux%u pitch=%u fmt=%02x lin=%d "
+            "lvls=%d",
+            tex_base, shape->width, shape->height, shape->pitch,
+            shape->color_format, fb.linear, shape->levels);
+    SurfaceBinding *s = exact ? exact
+                              : pgraph_vk_surface_get_within(
+                                    d, tex_base);
+    if (s) {
+        fprintf(stderr,
+                " | surf=%08" HWADDR_PRIx " %ux%u pitch=%u swz=%d color=%d "
+                "bpp=%u\n",
+                s->vram_addr, s->width, s->height, s->pitch, s->swizzle,
+                s->color, s->host_fmt.host_bytes_per_pixel);
+    } else {
+        fprintf(stderr, " | surf=none-within\n");
+    }
+}
+
+static void copy_gather_plan_to_texture(PGRAPHState *pg,
+                                        Surf2TexGatherPlan *plan,
+                                        TextureBinding *texture, bool fresh)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    TextureShape *state = &texture->key.state;
+    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+    unsigned int scale = pg->surface_scale_factor;
+
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_COPY);
+    g_nv2a_stats.frame_working.counters[NV2A_PROF_S2T_EXT_REGIONS] +=
+        plan->num_regions;
+    if (!plan->full_coverage) {
+        nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_PARTIAL);
+    }
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    if (fresh && !plan->full_coverage) {
+        VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
+        VkImageSubresourceRange range = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        };
+        vkCmdClearColorImage(cmd, texture->image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                             &range);
+    }
+
+    for (int i = 0; i < plan->num_regions; i++) {
+        SurfaceBinding *s = plan->regions[i].surface;
+
+        s->last_use_submit = r->submit_count;
+
+        pgraph_vk_transition_image_layout(
+            pg, cmd, s->image, s->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        VkImageCopy region = {
+            .srcSubresource.aspectMask = s->host_fmt.aspect,
+            .srcSubresource.layerCount = 1,
+            .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .dstSubresource.layerCount = 1,
+            .srcOffset.y = plan->regions[i].src_y * scale,
+            .dstOffset.y = plan->regions[i].dst_y * scale,
+            .extent.width = plan->regions[i].width,
+            .extent.height = plan->regions[i].rows,
+            .extent.depth = 1,
+        };
+        pgraph_apply_scaling_factor(pg, &region.extent.width,
+                                    &region.extent.height);
+
+        vkCmdCopyImage(cmd, s->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                       &region);
+
+        pgraph_vk_transition_image_layout(
+            pg, cmd, s->image, s->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    texture->draw_time = (int)plan->draw_time_key;
+}
+
+static bool is_pow2_square(unsigned int w, unsigned int h)
+{
+    return w == h && w != 0 && (w & (w - 1)) == 0;
+}
+
+static bool other_surface_overlaps_range(PGRAPHVkState *r,
+                                         const SurfaceBinding *self,
+                                         hwaddr base, size_t len)
+{
+    SurfaceBinding *s;
+    QTAILQ_FOREACH(s, &r->surfaces, entry) {
+        if (s == self) {
+            continue;
+        }
+        if (s->vram_addr + s->size > base && s->vram_addr < base + len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void copy_swizzled_quadrant_to_texture(PGRAPHState *pg,
+                                              SurfaceBinding *surface,
+                                              TextureBinding *texture)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    TextureShape *state = &texture->key.state;
+    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_COPY);
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_QUAD);
+
+    surface->last_use_submit = r->submit_count;
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
+
+    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
+                                      surface->host_fmt.vk_format,
+                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkImageCopy region = {
+        .srcSubresource.aspectMask = surface->host_fmt.aspect,
+        .srcSubresource.layerCount = 1,
+        .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .dstSubresource.layerCount = 1,
+        .extent.width = state->width,
+        .extent.height = state->height,
+        .extent.depth = 1,
+    };
+    pgraph_apply_scaling_factor(pg, &region.extent.width,
+                                &region.extent.height);
+    vkCmdCopyImage(cmd, surface->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                   &region);
+
+    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
+                                      surface->host_fmt.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    texture->draw_time = surface->draw_time;
+}
+
+static void bounce_linear_surface_to_swizzled_texture(PGRAPHState *pg,
+                                                      SurfaceBinding *surface,
+                                                      TextureBinding *texture,
+                                                      hwaddr tex_base)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    TextureShape *state = &texture->key.state;
+    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+
+    unsigned int surf_bpp = surface->host_fmt.host_bytes_per_pixel;
+    size_t tex_len = (size_t)state->width * state->height * 4;
+    hwaddr delta = tex_base - surface->vram_addr;
+    unsigned int first_row = delta / surface->pitch;
+    unsigned int rem_bytes = delta % surface->pitch;
+    unsigned int end_row =
+        DIV_ROUND_UP(delta + tex_len, (size_t)surface->pitch);
+    unsigned int rows = end_row - first_row;
+    size_t fill_len = (size_t)rows * surface->pitch;
+
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_COPY);
+    nv2a_profile_inc_counter(NV2A_PROF_S2T_EXT_BOUNCE);
+
+    surface->last_use_submit = r->submit_count;
+
+    VkImageLayout rest_layout =
+        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    VkBuffer in_buf = r->storage_buffers[BUFFER_COMPUTE_DST].buffer;
+    VkBuffer out_buf = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
+
+    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
+                                      surface->host_fmt.vk_format, rest_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    VkBufferMemoryBarrier reuse_barriers[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                             VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = in_buf,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
+                             VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = out_buf,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+    };
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, NULL, 2, reuse_barriers, 0, NULL);
+
+    vkCmdFillBuffer(cmd, in_buf, 0, fill_len, 0);
+    VkBufferMemoryBarrier fill_barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = in_buf,
+        .offset = 0,
+        .size = fill_len,
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                         &fill_barrier, 0, NULL);
+
+    VkBufferImageCopy to_buf = {
+        .bufferOffset = 0,
+        .bufferRowLength = surface->pitch / surf_bpp,
+        .bufferImageHeight = 0,
+        .imageSubresource.aspectMask = surface->host_fmt.aspect,
+        .imageSubresource.layerCount = 1,
+        .imageOffset.y = first_row,
+        .imageExtent.width = surface->width,
+        .imageExtent.height = MIN(rows, surface->height - first_row),
+        .imageExtent.depth = 1,
+    };
+    vkCmdCopyImageToBuffer(cmd, surface->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, in_buf, 1,
+                           &to_buf);
+
+    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
+                                      surface->host_fmt.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                      rest_layout);
+
+    VkBufferMemoryBarrier pre_compute = fill_barrier;
+    pre_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    pre_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
+                         &pre_compute, 0, NULL);
+
+    pgraph_vk_dispatch_deswizzle_u32(pg, cmd, state->width, state->height,
+                                     rem_bytes / 4);
+
+    VkBufferMemoryBarrier post_compute = fill_barrier;
+    post_compute.buffer = out_buf;
+    post_compute.size = tex_len;
+    post_compute.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    post_compute.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                         &post_compute, 0, NULL);
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkBufferImageCopy to_img = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.layerCount = 1,
+        .imageExtent.width = state->width,
+        .imageExtent.height = state->height,
+        .imageExtent.depth = 1,
+    };
+    vkCmdCopyBufferToImage(cmd, out_buf, texture->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &to_img);
+
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    texture->draw_time = surface->draw_time;
 }
 
 static void create_dummy_texture(PGRAPHState *pg)
@@ -1265,19 +1768,120 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     bool possibly_dirty_checked = false;
     bool surface_to_texture = false;
 
+    Surf2TexGatherPlan s2t_plan = { .num_regions = 0 };
+    bool s2t_plan_valid = false;
+    enum NV2A_PROF_COUNTERS_ENUM s2t_miss_counter = NV2A_PROF_S2T_MISS_NOSURF;
     SurfaceBinding *surface = pgraph_vk_surface_get(d, texture_vram_offset);
     if (surface && state.levels == 1) {
-        surface_to_texture =
-            check_surface_to_texture_compatiblity(surface, &state);
+        S2TCompat compat = surface_to_texture_compat_reason(surface, &state);
+        surface_to_texture = (compat == S2T_COMPAT_OK);
 
         if (!surface_to_texture && surface->color) {
             trace_nv2a_pgraph_surface_texture_compat_failed(
                 surface->shape.color_format,
                 state.color_format);
         }
+        switch (compat) {
+        case S2T_COMPAT_PITCH:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_PITCH;
+            break;
+        case S2T_COMPAT_DIMS:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_DIMS;
+            break;
+        case S2T_COMPAT_CUBEMAP:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_CUBEMAP;
+            break;
+        case S2T_COMPAT_MIPS:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_MIPS;
+            break;
+        case S2T_COMPAT_FORMAT:
+            s2t_miss_counter = NV2A_PROF_S2T_MISS_FORMAT;
+            break;
+        default:
+            break;
+        }
 
         if (surface_to_texture && surface->upload_pending) {
             pgraph_vk_upload_surface_data(d, surface, false);
+        }
+    } else if (surface) {
+        s2t_miss_counter = NV2A_PROF_S2T_MISS_MIPS;
+    }
+
+    enum {
+        S2T_PATH_NONE = 0,
+        S2T_PATH_GATHER,
+        S2T_PATH_QUAD,
+        S2T_PATH_BOUNCE,
+    } s2t_path = S2T_PATH_NONE;
+    SurfaceBinding *s2t_surface = NULL;
+    S2TGatherResult s2t_rej = S2T_GATHER_REJ_NONE_RESIDENT;
+    if (!surface_to_texture && surf2tex_ext_enabled()) {
+        PGRAPHVkState *r_ = pg->vk_renderer_state;
+        VkColorFormatInfo tex_vkf =
+            kelvin_color_format_vk_map[state.color_format];
+        unsigned int tex_bpp = vk_format_texel_size(tex_vkf.vk_format);
+        BasicColorFormatInfo tex_basic =
+            kelvin_color_format_info_map[state.color_format];
+        size_t tex_len = (size_t)state.width * state.height * tex_bpp;
+
+        SurfaceBinding *host =
+            surface ? surface :
+                      pgraph_vk_surface_get_within(d, texture_vram_offset);
+
+        if (host && state.levels == 1 && !tex_basic.linear &&
+            state.dimensionality == 2 && !state.cubemap &&
+            tex_vkf.vk_format && tex_bpp) {
+            hwaddr delta = texture_vram_offset - host->vram_addr;
+            if (host == surface && host->swizzle && host->color &&
+                is_pow2_square(state.width, state.height) &&
+                is_pow2_square(host->width, host->height) &&
+                host->width >= state.width &&
+                host->host_fmt.host_bytes_per_pixel == tex_bpp &&
+                !other_surface_overlaps_range(r_, host,
+                                              texture_vram_offset, tex_len)) {
+                s2t_path = S2T_PATH_QUAD;
+            } else if (!host->swizzle && tex_bpp == 4 &&
+                       is_pow2_square(state.width, state.height) &&
+                       pg->surface_scale_factor == 1 &&
+                       host->host_fmt.vk_format !=
+                           VK_FORMAT_D24_UNORM_S8_UINT &&
+                       host->host_fmt.vk_format !=
+                           VK_FORMAT_D32_SFLOAT_S8_UINT &&
+                       host->pitch != 0 &&
+                       (host->pitch %
+                        host->host_fmt.host_bytes_per_pixel) == 0 &&
+                       (delta % 4) == 0 &&
+                       DIV_ROUND_UP(delta + tex_len, (size_t)host->pitch) <=
+                           host->height &&
+                       !pgraph_vk_compute_needs_finish(r_) &&
+                       !other_surface_overlaps_range(r_, host,
+                                                     texture_vram_offset,
+                                                     tex_len)) {
+                s2t_path = S2T_PATH_BOUNCE;
+            }
+        }
+
+        if (s2t_path != S2T_PATH_NONE) {
+            s2t_surface = host;
+            if (s2t_surface->upload_pending) {
+                pgraph_vk_upload_surface_data(d, s2t_surface, false);
+            }
+            surface_to_texture = true;
+        } else {
+            s2t_rej = build_surf2tex_gather_plan(d, texture_vram_offset,
+                                                 &state, &s2t_plan);
+            if (s2t_rej == S2T_GATHER_OK) {
+                s2t_path = S2T_PATH_GATHER;
+                s2t_plan_valid = true;
+                surface_to_texture = true;
+                for (int i = 0; i < s2t_plan.num_regions; i++) {
+                    SurfaceBinding *s = s2t_plan.regions[i].surface;
+                    if (s->upload_pending) {
+                        pgraph_vk_upload_surface_data(d, s, false);
+                    }
+                }
+            }
         }
     }
 
@@ -1288,6 +1892,26 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
         if (forced > 0) {
             nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX_FALLBACK);
+            if (s2t_miss_counter == NV2A_PROF_S2T_MISS_NOSURF &&
+                pgraph_vk_surface_get_within(d, texture_vram_offset)) {
+                s2t_miss_counter = NV2A_PROF_S2T_MISS_WITHIN;
+            }
+            nv2a_profile_inc_counter(s2t_miss_counter);
+            if (surf2tex_ext_enabled() && s2t_rej != S2T_GATHER_OK) {
+                static const enum NV2A_PROF_COUNTERS_ENUM rej_counter[] = {
+                    [S2T_GATHER_REJ_TEXSHAPE] = NV2A_PROF_S2T_REJ_TEXSHAPE,
+                    [S2T_GATHER_REJ_SWIZSURF] = NV2A_PROF_S2T_REJ_SWIZSURF,
+                    [S2T_GATHER_REJ_PITCH] = NV2A_PROF_S2T_REJ_PITCH,
+                    [S2T_GATHER_REJ_BPP] = NV2A_PROF_S2T_REJ_BPP,
+                    [S2T_GATHER_REJ_ALIGN] = NV2A_PROF_S2T_REJ_ALIGN,
+                    [S2T_GATHER_REJ_OVERFLOW] = NV2A_PROF_S2T_REJ_OVERFLOW,
+                    [S2T_GATHER_REJ_NONE_RESIDENT] =
+                        NV2A_PROF_S2T_REJ_NONE_RESIDENT,
+                };
+                nv2a_profile_inc_counter(rej_counter[s2t_rej]);
+                surf2tex_debug_dump_miss(d, texture_vram_offset, &state,
+                                         surface);
+            }
         }
     }
 
@@ -1331,7 +1955,20 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (binding_found) {
         if (surface_to_texture) {
-            if (surface->draw_time != snode->draw_time) {
+            if (s2t_plan_valid) {
+                if ((int)s2t_plan.draw_time_key != snode->draw_time) {
+                    copy_gather_plan_to_texture(pg, &s2t_plan, snode, false);
+                }
+            } else if (s2t_path == S2T_PATH_QUAD) {
+                if (s2t_surface->draw_time != snode->draw_time) {
+                    copy_swizzled_quadrant_to_texture(pg, s2t_surface, snode);
+                }
+            } else if (s2t_path == S2T_PATH_BOUNCE) {
+                if (s2t_surface->draw_time != snode->draw_time) {
+                    bounce_linear_surface_to_swizzled_texture(
+                        pg, s2t_surface, snode, texture_vram_offset);
+                }
+            } else if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
         } else {
@@ -1538,7 +2175,17 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     r->texture_bindings[texture_idx] = snode;
 
     if (surface_to_texture) {
-        copy_surface_to_texture(pg, surface, snode);
+        if (s2t_plan_valid) {
+            copy_gather_plan_to_texture(pg, &s2t_plan, snode,
+                                        true );
+        } else if (s2t_path == S2T_PATH_QUAD) {
+            copy_swizzled_quadrant_to_texture(pg, s2t_surface, snode);
+        } else if (s2t_path == S2T_PATH_BOUNCE) {
+            bounce_linear_surface_to_swizzled_texture(pg, s2t_surface, snode,
+                                                      texture_vram_offset);
+        } else {
+            copy_surface_to_texture(pg, surface, snode);
+        }
     } else {
         upload_texture_image(pg, texture_idx, snode,
                              false );
