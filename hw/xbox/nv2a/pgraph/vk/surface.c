@@ -142,8 +142,39 @@ void pgraph_vk_surface_transition(PGRAPHState *pg, VkCommandBuffer cmd,
 
 VkImageLayout pgraph_vk_surface_rest_layout(const SurfaceBinding *surface)
 {
+    if (surface->feedback_mode) {
+        return VK_IMAGE_LAYOUT_GENERAL;
+    }
     return surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+}
+
+void pgraph_vk_surface_feedback_flush(PGRAPHState *pg, VkCommandBuffer cmd,
+                                      SurfaceBinding *surface)
+{
+    bool color = surface->color;
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = surface->image,
+        .srcAccessMask = color ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT :
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .subresourceRange.aspectMask = color ? VK_IMAGE_ASPECT_COLOR_BIT :
+                                               VK_IMAGE_ASPECT_DEPTH_BIT,
+        .subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS,
+        .subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS,
+    };
+    vkCmdPipelineBarrier(
+        cmd,
+        color ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT :
+                (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT),
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1,
+        &barrier);
 }
 
 int pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
@@ -1087,6 +1118,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
     surface->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    surface->feedback_mode = false;
     pgraph_vk_surface_transition(pg, cmd, surface,
                                  pgraph_vk_surface_rest_layout(surface));
 
@@ -1102,6 +1134,7 @@ static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
     dst->image_view = src->image_view;
     dst->allocation = src->allocation;
     dst->image_layout = src->image_layout;
+    dst->feedback_mode = false;
     dst->image_scratch = src->image_scratch;
     dst->image_scratch_current_layout = src->image_scratch_current_layout;
     dst->allocation_scratch = src->allocation_scratch;

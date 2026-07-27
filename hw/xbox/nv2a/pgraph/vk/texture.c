@@ -1110,6 +1110,53 @@ static bool surf2tex_zerocopy_enabled(void)
     return state == 1;
 }
 
+static bool surf2tex_feedback_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_SURF2TEX_FEEDBACK")) {
+            state = 0;
+        } else {
+            state = (getenv("XEMU_SURF2TEX_FEEDBACK") &&
+                     surf2tex_zerocopy_enabled()) ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_FEEDBACK on — still-bound render "
+                        "targets are sampled zero-copy in GENERAL layout (the "
+                        "cockpit feedback pattern)\n");
+            } else if (getenv("XEMU_SURF2TEX_FEEDBACK")) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_FEEDBACK ignored — requires "
+                        "XEMU_SURF2TEX_ZEROCOPY\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
+static void surf2tex_zerocopy_ensure(PGRAPHState *pg, SurfaceBinding *surface)
+{
+    VkImageLayout want = surface->feedback_mode ?
+                             VK_IMAGE_LAYOUT_GENERAL :
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bool need_transition = surface->image_layout != want;
+    bool need_flush = surface->feedback_mode &&
+                      surface->flushed_draw_time != surface->draw_time;
+    if (!need_transition && !need_flush) {
+        return;
+    }
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    if (need_transition) {
+        pgraph_vk_surface_transition(pg, cmd, surface, want);
+    }
+    if (need_flush) {
+        pgraph_vk_surface_feedback_flush(pg, cmd, surface);
+        surface->flushed_draw_time = surface->draw_time;
+        nv2a_profile_inc_counter(NV2A_PROF_ZC_FLUSHES);
+    }
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+}
+
 #define SURF2TEX_GATHER_MAX_REGIONS 16
 
 typedef struct Surf2TexGatherPlan {
@@ -1939,14 +1986,56 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     }
 
     bool s2t_zerocopy = false;
+    bool s2t_feedback = false;
     if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        surf2tex_zerocopy_enabled() && surface != NULL && !surface->color &&
+        state.levels == 1 && !state.cubemap && state.dimensionality == 2) {
+        bool is_bound_zeta = (surface == r->zeta_binding);
+        if (!is_bound_zeta || surf2tex_feedback_enabled()) {
+            VkColorFormatInfo zc_vkf =
+                kelvin_color_format_vk_map[state.color_format];
+            if (surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM &&
+                zc_vkf.vk_format &&
+                vk_format_texel_size(zc_vkf.vk_format) == 2) {
+                s2t_zerocopy = true;
+                if (is_bound_zeta && !surface->feedback_mode) {
+                    surface->feedback_mode = true;
+                    r->surface_generation++;
+                }
+                s2t_feedback = surface->feedback_mode;
+            } else {
+                nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_ZETA_SURF);
+            }
+        } else {
+            nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_ZETA_BOUND);
+        }
+    }
+    if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        !s2t_zerocopy && surf2tex_zerocopy_enabled() && surface != NULL &&
+        surface->color &&
+        (state.levels != 1 || state.cubemap || state.dimensionality != 2)) {
+        nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_SHAPE);
+    }
+    if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        !s2t_zerocopy &&
         surf2tex_zerocopy_enabled() && surface != NULL && surface->color &&
         state.levels == 1 && !state.cubemap && state.dimensionality == 2 &&
-        surface != r->color_binding && surface != r->zeta_binding) {
-        VkColorFormatInfo zc_vkf =
-            kelvin_color_format_vk_map[state.color_format];
-        if (zc_vkf.vk_format == surface->host_fmt.vk_format) {
-            s2t_zerocopy = true;
+        surface != r->zeta_binding) {
+        bool is_bound_target = (surface == r->color_binding);
+        if (!is_bound_target || surf2tex_feedback_enabled()) {
+            VkColorFormatInfo zc_vkf =
+                kelvin_color_format_vk_map[state.color_format];
+            if (zc_vkf.vk_format != surface->host_fmt.vk_format) {
+                nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_FMT);
+            }
+            if (zc_vkf.vk_format == surface->host_fmt.vk_format) {
+                s2t_zerocopy = true;
+                if (is_bound_target && !surface->feedback_mode) {
+                    surface->feedback_mode = true;
+                    r->surface_generation++;
+                }
+                s2t_feedback = surface->feedback_mode;
+            }
         }
     }
 
@@ -1996,15 +2085,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     if (binding_found) {
         if (surface_to_texture) {
             if (snode->borrowed) {
-                if (surface->image_layout !=
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-                    VkCommandBuffer zc_cmd =
-                        pgraph_vk_begin_nondraw_commands(pg);
-                    pgraph_vk_surface_transition(
-                        pg, zc_cmd, surface,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                    pgraph_vk_end_nondraw_commands(pg, zc_cmd);
-                }
+                surf2tex_zerocopy_ensure(pg, surface);
                 surface->last_use_submit = r->submit_count;
             } else if (s2t_plan_valid) {
                 if ((int)s2t_plan.draw_time_key != snode->draw_time) {
@@ -2051,6 +2132,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->possibly_dirty = false;
     snode->hash = content_hash;
     snode->borrowed = false;
+    snode->descriptor_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
     assert(vkf.vk_format != 0);
@@ -2088,6 +2170,9 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         snode->borrow_gen = r->surface_generation;
         snode->borrow_image = surface->image;
         snode->borrow_surface = surface;
+        snode->descriptor_layout =
+            s2t_feedback ? VK_IMAGE_LAYOUT_GENERAL :
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     } else {
         VmaAllocationCreateInfo alloc_create_info = {
             .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
@@ -2098,14 +2183,16 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                 &snode->allocation, NULL));
     }
 
+    bool zc_zeta = s2t_zerocopy && !surface->color;
     VkImageViewCreateInfo image_view_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = s2t_zerocopy ? surface->image : snode->image,
         .viewType = state.cubemap ?
             VK_IMAGE_VIEW_TYPE_CUBE :
             dimensionality_to_vk_image_view_type[state.dimensionality],
-        .format = vkf.vk_format,
-        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .format = zc_zeta ? surface->host_fmt.vk_format : vkf.vk_format,
+        .subresourceRange.aspectMask =
+            zc_zeta ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
         .subresourceRange.baseMipLevel = 0,
         .subresourceRange.levelCount =
             s2t_zerocopy ? 1 : image_create_info.mipLevels,
@@ -2239,16 +2326,9 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (surface_to_texture) {
         if (s2t_zerocopy) {
-            if (surface->image_layout !=
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-                VkCommandBuffer zc_cmd = pgraph_vk_begin_nondraw_commands(pg);
-                pgraph_vk_surface_transition(
-                    pg, zc_cmd, surface,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                pgraph_vk_end_nondraw_commands(pg, zc_cmd);
-            }
+            surf2tex_zerocopy_ensure(pg, surface);
             surface->last_use_submit = r->submit_count;
-            snode->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            snode->current_layout = snode->descriptor_layout;
             snode->draw_time = surface->draw_time;
         } else if (s2t_plan_valid) {
             copy_gather_plan_to_texture(pg, &s2t_plan, snode,
@@ -2310,11 +2390,11 @@ void pgraph_vk_bind_textures(NV2AState *d)
             continue;
         }
         SurfaceBinding *bs = b->borrow_surface;
-        if (bs->image_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-            VkCommandBuffer zc_cmd = pgraph_vk_begin_nondraw_commands(pg);
-            pgraph_vk_surface_transition(
-                pg, zc_cmd, bs, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            pgraph_vk_end_nondraw_commands(pg, zc_cmd);
+        VkImageLayout bs_want = bs->feedback_mode ?
+                                    VK_IMAGE_LAYOUT_GENERAL :
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (bs->image_layout != bs_want || bs->feedback_mode) {
+            surf2tex_zerocopy_ensure(pg, bs);
             bs->last_use_submit = r->submit_count;
         }
     }

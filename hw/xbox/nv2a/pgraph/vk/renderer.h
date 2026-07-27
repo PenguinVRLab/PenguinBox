@@ -54,6 +54,8 @@ typedef struct MemorySyncRequirement {
 typedef struct RenderPassState {
     VkFormat color_format;
     VkFormat zeta_format;
+    bool color_general;
+    bool zeta_general;
 } RenderPassState;
 
 typedef struct RenderPass {
@@ -125,6 +127,8 @@ typedef struct SurfaceBinding {
     size_t size;
 
     bool cleared;
+    bool feedback_mode;
+    int flushed_draw_time;
     int frame_time;
     int draw_time;
     bool draw_dirty;
@@ -233,6 +237,7 @@ typedef struct TextureBinding {
     uint32_t borrow_gen;
     VkImage borrow_image;
     SurfaceBinding *borrow_surface;
+    VkImageLayout descriptor_layout;
 } TextureBinding;
 
 typedef struct QueryReport {
