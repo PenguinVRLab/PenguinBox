@@ -886,6 +886,25 @@ static bool check_surfaces_overlap(const SurfaceBinding *surface,
                                         other_surface->size);
 }
 
+static bool alias_surfaces_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_ALIAS_SURFACES")) {
+            state = 0;
+        } else {
+            state = getenv("XEMU_ALIAS_SURFACES") ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_ALIAS_SURFACES on — small surface creates "
+                        "keep large overlapped parents resident (no "
+                        "evict+download cascade)\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
 static void invalidate_overlapping_surfaces(NV2AState *d,
                                             SurfaceBinding const *surface)
 {
@@ -894,6 +913,12 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
     SurfaceBinding *other_surface, *next_surface;
     QTAILQ_FOREACH_SAFE (other_surface, &r->surfaces, entry, next_surface) {
         if (check_surfaces_overlap(surface, other_surface)) {
+            if (alias_surfaces_enabled() &&
+                (uint64_t)surface->size * 4 <= other_surface->size &&
+                !other_surface->upload_pending) {
+                nv2a_profile_inc_counter(NV2A_PROF_ALIAS_KEPT);
+                continue;
+            }
             trace_nv2a_pgraph_surface_evict_overlapping(
                 other_surface->vram_addr, other_surface->width,
                 other_surface->height, other_surface->pitch);
@@ -907,12 +932,18 @@ static void surface_put(NV2AState *d, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
 
-    assert(pgraph_vk_surface_get(d, surface->vram_addr) == NULL);
+    assert(alias_surfaces_enabled() ||
+           pgraph_vk_surface_get(d, surface->vram_addr) == NULL);
 
     invalidate_overlapping_surfaces(d, surface);
     register_cpu_access_callback(d, surface);
 
     QTAILQ_INSERT_HEAD(&r->surfaces, surface, entry);
+}
+
+bool pgraph_vk_alias_surfaces_enabled(void)
+{
+    return alias_surfaces_enabled();
 }
 
 SurfaceBinding *pgraph_vk_surface_get(NV2AState *d, hwaddr addr)
@@ -1661,6 +1692,18 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         unbind_surface(d, color);
 
         SurfaceBinding *surface = pgraph_vk_surface_get(d, target.vram_addr);
+        if (alias_surfaces_enabled() && surface != NULL &&
+            !check_surface_compatibility(surface, &target, false)) {
+            SurfaceBinding *deeper;
+            QTAILQ_FOREACH(deeper, &r->surfaces, entry) {
+                if (deeper != surface &&
+                    deeper->vram_addr == target.vram_addr &&
+                    check_surface_compatibility(deeper, &target, false)) {
+                    surface = deeper;
+                    break;
+                }
+            }
+        }
         if (surface != NULL) {
             SurfaceBinding *other = (color ? r->zeta_binding
                                            : r->color_binding);
@@ -1737,6 +1780,10 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 surface->upload_pending |= mem_dirty;
                 pg->surface_zeta.buffer_dirty |= color;
                 should_create = false;
+            } else if (alias_surfaces_enabled() &&
+                       (uint64_t)target.size * 4 <= surface->size &&
+                       !surface->upload_pending) {
+                nv2a_profile_inc_counter(NV2A_PROF_ALIAS_KEPT);
             } else {
                 trace_nv2a_pgraph_surface_evict_reason(
                     "incompatible", surface->vram_addr);

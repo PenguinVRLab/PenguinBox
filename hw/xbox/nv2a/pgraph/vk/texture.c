@@ -1344,6 +1344,9 @@ static bool other_surface_overlaps_range(PGRAPHVkState *r,
         if (s == self) {
             continue;
         }
+        if (s->draw_time <= self->draw_time) {
+            continue;
+        }
         if (s->vram_addr + s->size > base && s->vram_addr < base + len) {
             return true;
         }
@@ -1803,6 +1806,23 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
         if (surface_to_texture && surface->upload_pending) {
             pgraph_vk_upload_surface_data(d, surface, false);
+        }
+
+        if (!surface_to_texture && pgraph_vk_alias_surfaces_enabled()) {
+            PGRAPHVkState *r_ = pg->vk_renderer_state;
+            SurfaceBinding *deeper;
+            QTAILQ_FOREACH(deeper, &r_->surfaces, entry) {
+                if (deeper != surface &&
+                    deeper->vram_addr == texture_vram_offset &&
+                    check_surface_to_texture_compatiblity(deeper, &state)) {
+                    surface = deeper;
+                    surface_to_texture = true;
+                    if (surface->upload_pending) {
+                        pgraph_vk_upload_surface_data(d, surface, false);
+                    }
+                    break;
+                }
+            }
         }
     } else if (surface) {
         s2t_miss_counter = NV2A_PROF_S2T_MISS_MIPS;

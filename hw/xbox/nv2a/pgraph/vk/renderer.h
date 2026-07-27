@@ -634,6 +634,7 @@ void pgraph_vk_refresh_narrowfence_toggle(void);
 bool pgraph_vk_narrowfence_enabled(void);
 void pgraph_vk_wait_for_surface_write(PGRAPHState *pg, SurfaceBinding *surface);
 SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
+bool pgraph_vk_alias_surfaces_enabled(void);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
 int pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
