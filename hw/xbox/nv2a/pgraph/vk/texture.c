@@ -813,20 +813,16 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
     StorageBuffer *dst_storage_buffer = &r->storage_buffers[BUFFER_COMPUTE_DST];
     assert(dst_storage_buffer->buffer_size >= copied_image_size);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     vkCmdCopyImageToBuffer(
         cmd, surface->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         dst_storage_buffer->buffer,
         num_regions, regions);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     VkBuffer texture_source_buffer;
 
@@ -974,11 +970,8 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
@@ -1000,11 +993,8 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, texture->image,
                    texture->current_layout, 1, &region);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
@@ -1095,6 +1085,25 @@ static bool surf2tex_ext_enabled(void)
                         "nv2a: XEMU_SURF2TEX_EXT on — multi-surface gather GPU "
                         "copy for surface-as-texture binds (replaces the "
                         "download+rehash fallback where row-compatible)\n");
+            }
+        }
+    }
+    return state == 1;
+}
+
+static bool surf2tex_zerocopy_enabled(void)
+{
+    static int state = -1;
+    if (state < 0) {
+        if (getenv("XEMU_NO_SURF2TEX_ZEROCOPY")) {
+            state = 0;
+        } else {
+            state = getenv("XEMU_SURF2TEX_ZEROCOPY") ? 1 : 0;
+            if (state == 1) {
+                fprintf(stderr,
+                        "nv2a: XEMU_SURF2TEX_ZEROCOPY on — exact-match "
+                        "surface-as-texture binds sample the surface image "
+                        "directly (no per-rebind copy)\n");
             }
         }
     }
@@ -1290,10 +1299,8 @@ static void copy_gather_plan_to_texture(PGRAPHState *pg,
 
         s->last_use_submit = r->submit_count;
 
-        pgraph_vk_transition_image_layout(
-            pg, cmd, s->image, s->host_fmt.vk_format,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        pgraph_vk_surface_transition(pg, cmd, s,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
         VkImageCopy region = {
             .srcSubresource.aspectMask = s->host_fmt.aspect,
@@ -1313,10 +1320,8 @@ static void copy_gather_plan_to_texture(PGRAPHState *pg,
                        texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                        &region);
 
-        pgraph_vk_transition_image_layout(
-            pg, cmd, s->image, s->host_fmt.vk_format,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        pgraph_vk_surface_transition(pg, cmd, s,
+                                     pgraph_vk_surface_rest_layout(s));
     }
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
@@ -1370,10 +1375,8 @@ static void copy_swizzled_quadrant_to_texture(PGRAPHState *pg,
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
-    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
-                                      surface->host_fmt.vk_format,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -1394,10 +1397,8 @@ static void copy_swizzled_quadrant_to_texture(PGRAPHState *pg,
                    texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                    &region);
 
-    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
-                                      surface->host_fmt.vk_format,
-                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1433,18 +1434,14 @@ static void bounce_linear_surface_to_swizzled_texture(PGRAPHState *pg,
 
     surface->last_use_submit = r->submit_count;
 
-    VkImageLayout rest_layout =
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     VkBuffer in_buf = r->storage_buffers[BUFFER_COMPUTE_DST].buffer;
     VkBuffer out_buf = r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
 
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
-    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
-                                      surface->host_fmt.vk_format, rest_layout,
-                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     VkBufferMemoryBarrier reuse_barriers[2] = {
         {
@@ -1507,10 +1504,8 @@ static void bounce_linear_surface_to_swizzled_texture(PGRAPHState *pg,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, in_buf, 1,
                            &to_buf);
 
-    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
-                                      surface->host_fmt.vk_format,
-                                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                      rest_layout);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     VkBufferMemoryBarrier pre_compute = fill_barrier;
     pre_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1695,6 +1690,10 @@ static void destroy_dummy_texture(PGRAPHVkState *r)
 static void set_texture_label(PGRAPHState *pg, TextureBinding *texture)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (texture->borrowed) {
+        return;
+    }
 
     g_autofree gchar *label = g_strdup_printf(
         "Texture %" HWADDR_PRIx "h fmt:%02xh %dx%dx%d lvls:%d",
@@ -1939,10 +1938,31 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         key.scale = pg->surface_scale_factor;
     }
 
+    bool s2t_zerocopy = false;
+    if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
+        surf2tex_zerocopy_enabled() && surface != NULL && surface->color &&
+        state.levels == 1 && !state.cubemap && state.dimensionality == 2 &&
+        surface != r->color_binding && surface != r->zeta_binding) {
+        VkColorFormatInfo zc_vkf =
+            kelvin_color_format_vk_map[state.color_format];
+        if (zc_vkf.vk_format == surface->host_fmt.vk_format) {
+            s2t_zerocopy = true;
+        }
+    }
+
     uint64_t key_hash = fast_hash((void*)&key, sizeof(key));
     LruNode *node = lru_lookup(&r->texture_cache, key_hash, &key);
     TextureBinding *snode = container_of(node, TextureBinding, node);
-    bool binding_found = snode->image != VK_NULL_HANDLE;
+    bool binding_found = snode->image != VK_NULL_HANDLE || snode->borrowed;
+
+    if (binding_found &&
+        ((snode->borrowed &&
+          (!s2t_zerocopy || snode->borrow_gen != r->surface_generation ||
+           snode->borrow_image != surface->image)) ||
+         (!snode->borrowed && s2t_zerocopy))) {
+        texture_cache_release_node_resources(r, snode);
+        binding_found = false;
+    }
 
     if (binding_found) {
         NV2A_VK_DPRINTF("Cache hit");
@@ -1975,7 +1995,18 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (binding_found) {
         if (surface_to_texture) {
-            if (s2t_plan_valid) {
+            if (snode->borrowed) {
+                if (surface->image_layout !=
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                    VkCommandBuffer zc_cmd =
+                        pgraph_vk_begin_nondraw_commands(pg);
+                    pgraph_vk_surface_transition(
+                        pg, zc_cmd, surface,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    pgraph_vk_end_nondraw_commands(pg, zc_cmd);
+                }
+                surface->last_use_submit = r->submit_count;
+            } else if (s2t_plan_valid) {
                 if ((int)s2t_plan.draw_time_key != snode->draw_time) {
                     copy_gather_plan_to_texture(pg, &s2t_plan, snode, false);
                 }
@@ -2019,6 +2050,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     snode->possibly_dirty = false;
     snode->hash = content_hash;
+    snode->borrowed = false;
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
     assert(vkf.vk_format != 0);
@@ -2049,26 +2081,37 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                         &image_create_info.extent.height);
     }
 
-    VmaAllocationCreateInfo alloc_create_info = {
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-    };
+    if (s2t_zerocopy) {
+        snode->image = VK_NULL_HANDLE;
+        snode->allocation = VK_NULL_HANDLE;
+        snode->borrowed = true;
+        snode->borrow_gen = r->surface_generation;
+        snode->borrow_image = surface->image;
+        snode->borrow_surface = surface;
+    } else {
+        VmaAllocationCreateInfo alloc_create_info = {
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        };
 
-    VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
-                            &alloc_create_info, &snode->image,
-                            &snode->allocation, NULL));
+        VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                                &alloc_create_info, &snode->image,
+                                &snode->allocation, NULL));
+    }
 
     VkImageViewCreateInfo image_view_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = snode->image,
+        .image = s2t_zerocopy ? surface->image : snode->image,
         .viewType = state.cubemap ?
             VK_IMAGE_VIEW_TYPE_CUBE :
             dimensionality_to_vk_image_view_type[state.dimensionality],
         .format = vkf.vk_format,
         .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .subresourceRange.baseMipLevel = 0,
-        .subresourceRange.levelCount = image_create_info.mipLevels,
+        .subresourceRange.levelCount =
+            s2t_zerocopy ? 1 : image_create_info.mipLevels,
         .subresourceRange.baseArrayLayer = 0,
-        .subresourceRange.layerCount = image_create_info.arrayLayers,
+        .subresourceRange.layerCount =
+            s2t_zerocopy ? 1 : image_create_info.arrayLayers,
         .components = vkf.component_map,
     };
 
@@ -2195,7 +2238,19 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     r->texture_bindings[texture_idx] = snode;
 
     if (surface_to_texture) {
-        if (s2t_plan_valid) {
+        if (s2t_zerocopy) {
+            if (surface->image_layout !=
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                VkCommandBuffer zc_cmd = pgraph_vk_begin_nondraw_commands(pg);
+                pgraph_vk_surface_transition(
+                    pg, zc_cmd, surface,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                pgraph_vk_end_nondraw_commands(pg, zc_cmd);
+            }
+            surface->last_use_submit = r->submit_count;
+            snode->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            snode->draw_time = surface->draw_time;
+        } else if (s2t_plan_valid) {
             copy_gather_plan_to_texture(pg, &s2t_plan, snode,
                                         true );
         } else if (s2t_path == S2T_PATH_QUAD) {
@@ -2245,6 +2300,25 @@ void pgraph_vk_bind_textures(NV2AState *d)
 
     r->texture_bindings_changed = false;
 
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        TextureBinding *b = r->texture_bindings[i];
+        if (!b || !b->borrowed) {
+            continue;
+        }
+        if (b->borrow_gen != r->surface_generation) {
+            pg->texture_dirty[i] = true;
+            continue;
+        }
+        SurfaceBinding *bs = b->borrow_surface;
+        if (bs->image_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            VkCommandBuffer zc_cmd = pgraph_vk_begin_nondraw_commands(pg);
+            pgraph_vk_surface_transition(
+                pg, zc_cmd, bs, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            pgraph_vk_end_nondraw_commands(pg, zc_cmd);
+            bs->last_use_submit = r->submit_count;
+        }
+    }
+
     if (!check_textures_dirty(pg)) {
         NV2A_VK_DPRINTF("Not dirty");
         NV2A_VK_DGROUP_END();
@@ -2287,6 +2361,13 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
 
     vkDestroyImageView(r->device, snode->image_view, NULL);
     snode->image_view = VK_NULL_HANDLE;
+
+    if (snode->borrowed) {
+        snode->borrowed = false;
+        snode->borrow_image = VK_NULL_HANDLE;
+        assert(snode->image == VK_NULL_HANDLE);
+        return;
+    }
 
     vmaDestroyImage(r->allocator, snode->image, snode->allocation);
     snode->image = VK_NULL_HANDLE;

@@ -1296,6 +1296,20 @@ static void begin_render_pass(PGRAPHState *pg)
 
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_RENDERPASSES);
 
+    if (r->color_binding &&
+        r->color_binding->image_layout !=
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        pgraph_vk_surface_transition(pg, r->command_buffer, r->color_binding,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+    if (r->zeta_binding &&
+        r->zeta_binding->image_layout !=
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        pgraph_vk_surface_transition(
+            pg, r->command_buffer, r->zeta_binding,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    }
+
     unsigned int vp_width = pg->surface_binding_dim.width,
                  vp_height = pg->surface_binding_dim.height;
     pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);

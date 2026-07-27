@@ -128,6 +128,24 @@ static bool check_surface_overlaps_range(const SurfaceBinding *surface,
     return !(surface->vram_addr >= range_end || range_start >= surface_end);
 }
 
+void pgraph_vk_surface_transition(PGRAPHState *pg, VkCommandBuffer cmd,
+                                  SurfaceBinding *surface, VkImageLayout to)
+{
+    if (surface->image_layout == to) {
+        return;
+    }
+    pgraph_vk_transition_image_layout(pg, cmd, surface->image,
+                                      surface->host_fmt.vk_format,
+                                      surface->image_layout, to);
+    surface->image_layout = to;
+}
+
+VkImageLayout pgraph_vk_surface_rest_layout(const SurfaceBinding *surface)
+{
+    return surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+}
+
 int pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
                                                   hwaddr start, hwaddr size)
 {
@@ -210,11 +228,8 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     int num_copy_regions = 1;
     VkBufferImageCopy copy_regions[2];
@@ -315,11 +330,8 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy_buffer,
                            num_copy_regions, copy_regions);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     if (use_compute_to_convert_depth_stencil_format) {
         size_t bytes_per_pixel = 4;
@@ -875,6 +887,8 @@ static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
 
     unregister_cpu_access_callback(d, surface);
 
+    r->surface_generation++;
+
     QTAILQ_REMOVE(&r->surfaces, surface, entry);
     QTAILQ_INSERT_HEAD(&r->invalid_surfaces, surface, entry);
 }
@@ -1072,11 +1086,9 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    surface->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_3);
     pgraph_vk_end_debug_marker(r, cmd);
@@ -1089,6 +1101,7 @@ static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
     dst->image = src->image;
     dst->image_view = src->image_view;
     dst->allocation = src->allocation;
+    dst->image_layout = src->image_layout;
     dst->image_scratch = src->image_scratch;
     dst->image_scratch_current_layout = src->image_scratch_current_layout;
     dst->allocation_scratch = src->allocation_scratch;
@@ -1475,11 +1488,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     surface->image_scratch_current_layout =
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     bool upscale = pg->surface_scale_factor > 1 &&
                    !use_compute_to_convert_depth_stencil_format;
@@ -1523,11 +1533,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         }
     }
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    pgraph_vk_surface_transition(pg, cmd, surface,
+                                 pgraph_vk_surface_rest_layout(surface));
 
     if (!inbatch) {
         nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_2);

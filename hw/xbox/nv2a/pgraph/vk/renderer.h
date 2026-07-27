@@ -144,6 +144,8 @@ typedef struct SurfaceBinding {
     VkImageView image_view;
     VmaAllocation allocation;
 
+    VkImageLayout image_layout;
+
     VkImage image_scratch;
     VkImageLayout image_scratch_current_layout;
     VmaAllocation allocation_scratch;
@@ -227,6 +229,10 @@ typedef struct TextureBinding {
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;
+    bool borrowed;
+    uint32_t borrow_gen;
+    VkImage borrow_image;
+    SurfaceBinding *borrow_surface;
 } TextureBinding;
 
 typedef struct QueryReport {
@@ -466,6 +472,7 @@ typedef struct PGRAPHVkState {
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
     QTAILQ_HEAD(, SurfaceBinding) invalid_surfaces;
+    uint32_t surface_generation;
     SurfaceBinding *color_binding, *zeta_binding;
     bool downloads_pending;
     QemuEvent downloads_complete;
@@ -635,6 +642,9 @@ bool pgraph_vk_narrowfence_enabled(void);
 void pgraph_vk_wait_for_surface_write(PGRAPHState *pg, SurfaceBinding *surface);
 SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
 bool pgraph_vk_alias_surfaces_enabled(void);
+void pgraph_vk_surface_transition(PGRAPHState *pg, VkCommandBuffer cmd,
+                                  SurfaceBinding *surface, VkImageLayout to);
+VkImageLayout pgraph_vk_surface_rest_layout(const SurfaceBinding *surface);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
 int pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
