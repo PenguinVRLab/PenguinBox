@@ -5,7 +5,26 @@
 
 #include "qemu/osdep.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#define RTLD_NOW   0
+#define RTLD_LOCAL 0
+static inline void *dlopen(const char *name, int flags)
+{
+    (void)flags;
+    return (void *)LoadLibraryA(name);
+}
+static inline void *dlsym(void *handle, const char *symbol)
+{
+    return (void *)(uintptr_t)GetProcAddress((HMODULE)handle, symbol);
+}
+static inline const char *dlerror(void)
+{
+    return "OpenXR runtime unavailable (no dlfcn on Windows)";
+}
+#else
 #include <dlfcn.h>
+#endif
 
 #include "vr_xr_loader.h"
 

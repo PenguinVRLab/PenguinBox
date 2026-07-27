@@ -54,6 +54,8 @@ typedef struct MemorySyncRequirement {
 typedef struct RenderPassState {
     VkFormat color_format;
     VkFormat zeta_format;
+    bool color_general;
+    bool zeta_general;
 } RenderPassState;
 
 typedef struct RenderPass {
@@ -125,6 +127,8 @@ typedef struct SurfaceBinding {
     size_t size;
 
     bool cleared;
+    bool feedback_mode;
+    int flushed_draw_time;
     int frame_time;
     int draw_time;
     bool draw_dirty;
@@ -143,6 +147,8 @@ typedef struct SurfaceBinding {
     VkImage image;
     VkImageView image_view;
     VmaAllocation allocation;
+
+    VkImageLayout image_layout;
 
     VkImage image_scratch;
     VkImageLayout image_scratch_current_layout;
@@ -227,6 +233,12 @@ typedef struct TextureBinding {
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;
+    int copied_frame_time;
+    bool borrowed;
+    uint32_t borrow_gen;
+    VkImage borrow_image;
+    SurfaceBinding *borrow_surface;
+    VkImageLayout descriptor_layout;
 } TextureBinding;
 
 typedef struct QueryReport {
@@ -358,6 +370,7 @@ typedef struct PGRAPHVkComputeState {
     VkPipelineLayout pipeline_layout;
     Lru pipeline_cache;
     ComputePipeline *pipeline_cache_entries;
+    VkPipeline deswizzle_pipeline;
 } PGRAPHVkComputeState;
 
 typedef struct PGRAPHVkState {
@@ -465,6 +478,7 @@ typedef struct PGRAPHVkState {
 
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
     QTAILQ_HEAD(, SurfaceBinding) invalid_surfaces;
+    uint32_t surface_generation;
     SurfaceBinding *color_binding, *zeta_binding;
     bool downloads_pending;
     QemuEvent downloads_complete;
@@ -633,6 +647,10 @@ void pgraph_vk_refresh_narrowfence_toggle(void);
 bool pgraph_vk_narrowfence_enabled(void);
 void pgraph_vk_wait_for_surface_write(PGRAPHState *pg, SurfaceBinding *surface);
 SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
+bool pgraph_vk_alias_surfaces_enabled(void);
+void pgraph_vk_surface_transition(PGRAPHState *pg, VkCommandBuffer cmd,
+                                  SurfaceBinding *surface, VkImageLayout to);
+VkImageLayout pgraph_vk_surface_rest_layout(const SurfaceBinding *surface);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
 int pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
@@ -650,6 +668,9 @@ void pgraph_vk_init_compute(PGRAPHState *pg);
 bool pgraph_vk_compute_needs_finish(PGRAPHVkState *r);
 void pgraph_vk_compute_finish_complete(PGRAPHVkState *r);
 void pgraph_vk_finalize_compute(PGRAPHState *pg);
+void pgraph_vk_dispatch_deswizzle_u32(PGRAPHState *pg, VkCommandBuffer cmd,
+                                      unsigned int tex_w, unsigned int tex_h,
+                                      unsigned int src_bias_words);
 void pgraph_vk_pack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
                                   VkCommandBuffer cmd, VkBuffer src,
                                   VkBuffer dst, bool downscale);
