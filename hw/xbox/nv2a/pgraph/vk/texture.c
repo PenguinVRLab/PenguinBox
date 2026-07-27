@@ -1988,27 +1988,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     bool s2t_zerocopy = false;
     bool s2t_feedback = false;
     if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
-        surf2tex_zerocopy_enabled() && surface != NULL && !surface->color &&
-        state.levels == 1 && !state.cubemap && state.dimensionality == 2) {
-        bool is_bound_zeta = (surface == r->zeta_binding);
-        if (!is_bound_zeta || surf2tex_feedback_enabled()) {
-            VkColorFormatInfo zc_vkf =
-                kelvin_color_format_vk_map[state.color_format];
-            if (surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM &&
-                zc_vkf.vk_format &&
-                vk_format_texel_size(zc_vkf.vk_format) == 2) {
-                s2t_zerocopy = true;
-                if (is_bound_zeta && !surface->feedback_mode) {
-                    surface->feedback_mode = true;
-                    r->surface_generation++;
-                }
-                s2t_feedback = surface->feedback_mode;
-            } else {
-                nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_ZETA_SURF);
-            }
-        } else {
-            nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_ZETA_BOUND);
-        }
+        surf2tex_zerocopy_enabled() && surface != NULL && !surface->color) {
+        nv2a_profile_inc_counter(NV2A_PROF_ZC_REJ_ZETA_SURF);
     }
     if (surface_to_texture && !s2t_plan_valid && s2t_path == S2T_PATH_NONE &&
         !s2t_zerocopy && surf2tex_zerocopy_enabled() && surface != NULL &&
@@ -2100,6 +2081,12 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                     bounce_linear_surface_to_swizzled_texture(
                         pg, s2t_surface, snode, texture_vram_offset);
                 }
+            } else if (!surface->color && surf2tex_feedback_enabled()) {
+                if (snode->copied_frame_time != surface->frame_time) {
+                    copy_surface_to_texture(pg, surface, snode);
+                    snode->copied_frame_time = surface->frame_time;
+                    snode->draw_time = surface->draw_time;
+                }
             } else if (surface->draw_time != snode->draw_time) {
                 copy_surface_to_texture(pg, surface, snode);
             }
@@ -2132,6 +2119,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->possibly_dirty = false;
     snode->hash = content_hash;
     snode->borrowed = false;
+    snode->copied_frame_time = -1;
     snode->descriptor_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
@@ -2183,16 +2171,14 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                 &snode->allocation, NULL));
     }
 
-    bool zc_zeta = s2t_zerocopy && !surface->color;
     VkImageViewCreateInfo image_view_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = s2t_zerocopy ? surface->image : snode->image,
         .viewType = state.cubemap ?
             VK_IMAGE_VIEW_TYPE_CUBE :
             dimensionality_to_vk_image_view_type[state.dimensionality],
-        .format = zc_zeta ? surface->host_fmt.vk_format : vkf.vk_format,
-        .subresourceRange.aspectMask =
-            zc_zeta ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
+        .format = vkf.vk_format,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .subresourceRange.baseMipLevel = 0,
         .subresourceRange.levelCount =
             s2t_zerocopy ? 1 : image_create_info.mipLevels,
@@ -2340,6 +2326,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                                                       texture_vram_offset);
         } else {
             copy_surface_to_texture(pg, surface, snode);
+            snode->copied_frame_time = surface->frame_time;
         }
     } else {
         upload_texture_image(pg, texture_idx, snode,

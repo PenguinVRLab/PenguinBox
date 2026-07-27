@@ -233,6 +233,7 @@ typedef struct TextureBinding {
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;
+    int copied_frame_time;
     bool borrowed;
     uint32_t borrow_gen;
     VkImage borrow_image;
