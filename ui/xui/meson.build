@@ -14,6 +14,7 @@ xemu_ss.add(files(
   'notifications.cc',
   'popup-menu.cc',
   'reporting.cc',
+  'sbc-diagnostics.cc',
   'sbc-overlay.cc',
   'scene-components.cc',
   'scene-manager.cc',

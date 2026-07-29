@@ -351,14 +351,22 @@ void SbcOverlayDraw(void)
         AxisMeter("Y", sbc.axis[SBC_AXIS_AIMING_Y]);
         AxisMeter("ROT", sbc.axis[SBC_AXIS_ROTATION_LEVER]);
 
-        // 5. Everything else (default collapsed).
-        if (ImGui::CollapsingHeader(
-                "All controls",
-                g_config.display.ui.sbc_overlay.show_all_controls ?
-                    ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+        // 5. Everything else, driven by config -- NOT a clickable header.
+        //
+        // This window is NoInputs (see the flags above: the mouse is the
+        // aiming lever and the overlay must never take it), so a
+        // CollapsingHeader here renders but can never be clicked. It used to
+        // be one, which read as a broken button. Drive it from the View menu
+        // instead and show where the control lives.
+        ImGui::Separator();
+        if (g_config.display.ui.sbc_overlay.show_all_controls) {
+            ImGui::TextColored(kDim, "ALL CONTROLS");
             ButtonRow(g_rest, std::size(g_rest), sbc.buttons, 3);
             ImGui::Separator();
             ButtonRow(g_axis_keys, std::size(g_axis_keys), 0, 3);
+        } else {
+            ImGui::TextColored(kDim, "+%zu more \xe2\x80\x94 View menu",
+                               std::size(g_rest) + std::size(g_axis_keys));
         }
     }
     ImGui::End();

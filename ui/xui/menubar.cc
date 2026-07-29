@@ -26,6 +26,7 @@
 #include "debug.hh"
 #include "actions.hh"
 #include "compat.hh"
+#include "sbc-diagnostics.hh"
 #include "sbc-overlay.hh"
 #include "update.hh"
 #include "../xemu-input.h"
@@ -157,6 +158,14 @@ void ShowMainMenu()
 
             if (ImGui::MenuItem("Settings...")) g_main_menu.ShowSettings();
 
+            /* The Steel Battalion diagnostics panel lives in Machine, not
+             * Debug: its primary audience is a user whose controller silently
+             * failed to open, not a developer. Always enabled — with no
+             * controller attached it is the "connect it now" prompt, and the
+             * synthetic source makes it useful with no hardware at all. */
+            ImGui::MenuItem("Steel Battalion Controller...", NULL,
+                            &sbc_diagnostics_window.m_is_open);
+
             ImGui::Separator();
 
             if (ImGui::MenuItem("Reset", SHORTCUT_MENU_TEXT(R))) ActionReset();
@@ -242,6 +251,16 @@ void ShowMainMenu()
                                 SbcOverlayAvailable())) {
                 g_config.display.ui.sbc_overlay.enable =
                     !g_config.display.ui.sbc_overlay.enable;
+            }
+
+            /* The overlay is click-through by design (the mouse is the aiming
+             * lever), so this cannot be a control inside the panel itself. */
+            if (ImGui::MenuItem("Show All SBC Controls", NULL,
+                                g_config.display.ui.sbc_overlay.show_all_controls,
+                                SbcOverlayAvailable() &&
+                                    g_config.display.ui.sbc_overlay.enable)) {
+                g_config.display.ui.sbc_overlay.show_all_controls =
+                    !g_config.display.ui.sbc_overlay.show_all_controls;
             }
 
             ImGui::EndMenu();

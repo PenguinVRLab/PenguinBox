@@ -46,6 +46,7 @@
 #include "main-menu.hh"
 #include "popup-menu.hh"
 #include "notifications.hh"
+#include "sbc-diagnostics.hh"
 #include "sbc-overlay.hh"
 #include "monitor.hh"
 #include "debug.hh"
@@ -319,6 +320,9 @@ void xemu_hud_update(void)
     monitor_window.Draw();
     apu_window.Draw();
     video_window.Draw();
+    /* Interactive tool window, unlike SbcOverlayDraw() below — drawn here so
+     * it sits under the scene manager's modal surfaces. Inert when closed. */
+    sbc_diagnostics_window.Draw();
     compatibility_reporter_window.Draw();
 #if defined(_WIN32)
     update_window.Draw();
