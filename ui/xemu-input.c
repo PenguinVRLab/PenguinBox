@@ -1041,7 +1041,7 @@ bool xemu_input_keyboard_feeds_sbc(void)
     return xemu_input_get_keyboard_sbc() != NULL;
 }
 
-void xemu_input_bind(int index, ControllerState *state, int save)
+void xemu_input_bind(int index, ControllerState *state, int live_apply_flag)
 {
     // FIXME: Attempt to disable rumble when unbinding so it's not left
     // in rumble mode
@@ -1074,8 +1074,10 @@ void xemu_input_bind(int index, ControllerState *state, int save)
         bound_controllers[index] = NULL;
     }
 
-    // Save this controller's GUID in settings for auto re-connect
-    if (save) {
+    // Record this controller's GUID in the in-memory config for auto re-connect.
+    // NOTE: memory only. xemu_settings_set_string() writes the g_config struct;
+    // nothing here reaches the disk.
+    if (live_apply_flag) {
         char guid_buf[35] = { 0 };
         if (state) {
             if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {

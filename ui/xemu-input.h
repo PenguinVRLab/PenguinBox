@@ -245,7 +245,17 @@ bool xemu_input_keyboard_feeds_sbc(void);
  * xemu_input_keyboard_feeds_sbc() (which is now a wrapper), but hands back the
  * state so a read-only consumer — the cockpit overlay — can mirror it. */
 ControllerState *xemu_input_get_keyboard_sbc(void);
-void xemu_input_bind(int index, ControllerState *state, int save);
+/*
+ * Bind `state` to port `index`. The device is plugged/unplugged LIVE and
+ * unconditionally -- that half does not depend on the flag.
+ *
+ * live_apply_flag controls only whether the binding is recorded in g_config
+ * (the GUID + driver, for auto-reconnect next launch). That is an IN-MEMORY
+ * update: xemu_settings_set_string() touches the struct, never the disk. The
+ * config file is written elsewhere (see xemu_settings_save_if_changed).
+ * It was called `save`, which read as "persist to disk" at every call site.
+ */
+void xemu_input_bind(int index, ControllerState *state, int live_apply_flag);
 bool xemu_input_bind_xmu(int player_index, int peripheral_port_index,
                          const char *filename, bool is_rebind);
 void xemu_input_rebind_xmu(int port);
