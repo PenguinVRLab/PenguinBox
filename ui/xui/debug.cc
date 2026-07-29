@@ -17,6 +17,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 #include <inttypes.h>
+#include "hw/xbox/nv2a/nv2a-renderer-status.h"
 #include "debug.hh"
 #include "common.hh"
 #include "misc.hh"
@@ -377,6 +378,17 @@ void DebugVideoWindow::Draw()
     m_prev_scale = g_viewport_mgr.m_scale;
 
     if (ImGui::Begin("Video Debug", &m_is_open)) {
+        if (nv2a_get_renderer_fallback_active()) {
+            /* The exact panel a 2026-07-28 field screenshot was captured
+             * from, showing a wall that turned out to need this line to be
+             * diagnosable at a glance instead of by downloading the binary
+             * and grepping it (docs/perf/loc/00-baseline.md § Field
+             * observation). Every FPS/MSPF number below is meaningless for
+             * diagnosing the S2T/perf levers while this banner is showing. */
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s",
+                                nv2a_get_renderer_fallback_reason());
+            ImGui::Separator();
+        }
         double x_start, x_end;
         static ImPlotAxisFlags rt_axis = ImPlotAxisFlags_NoTickLabels;
         ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, ImVec2(5,5));

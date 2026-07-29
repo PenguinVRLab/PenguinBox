@@ -29,6 +29,7 @@
 #include "gl-helpers.hh"
 #include "reporting.hh"
 #ifdef CONFIG_VULKAN
+#include "hw/xbox/nv2a/nv2a-renderer-status.h"
 #include "hw/xbox/nv2a/pgraph/vk/vr_public.h"
 #endif
 #include "qapi/error.h"
@@ -767,6 +768,10 @@ void MainMenuDisplayView::Draw()
 #endif
                  ,
                  "Select desired renderer implementation");
+    if (nv2a_get_renderer_fallback_active()) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s",
+                            nv2a_get_renderer_fallback_reason());
+    }
     int rendering_scale = nv2a_get_surface_scale_factor() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"
