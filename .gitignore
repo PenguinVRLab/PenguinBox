@@ -32,3 +32,6 @@ build.log
 /.env.local
 .claude/
 flicker-results/
+
+# Literal secret tokens for the release tripwire — NEVER commit.
+/tools/release/tripwire.local.txt

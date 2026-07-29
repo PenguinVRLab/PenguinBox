@@ -44,6 +44,37 @@ they're all avoidable. Read before trusting any FPS/frame-time number.
    seconds with no debugger attached. Also: attaching gdb briefly PAUSES the
    guest — never do it mid-firefight on a live session (the mech can get hit).
 
+## Traps 5–9 (added after the LoC campaign, 2026-07-27 — each also burned us)
+
+5. **The unarmed-detector zero.** "0 VK validation errors" means nothing unless
+   the validation layer was actually active — it is gated on
+   `display.vulkan.validation_layers` (default off), and as of 2026-07-27 the
+   plumbing produces no output *even when set* (unfixed). Before quoting any
+   "zero X" from a log grep, confirm the detector's startup banner is in the
+   log. Zero-because-clean and zero-because-off are indistinguishable.
+6. **The rolling-profiler dilution.** `XEMU_GUEST_PROFILE`'s sample ring is a
+   rolling window flushed every N flips. A dump read after the scene ended is
+   dominated by post-scene menu idle (we read "96% kernel idle" from what was
+   really an 86%-game-code scene). `cp` the dump file **mid-scene**; distrust
+   end-of-run bins.
+7. **The `| `-prefix log-attribution trap.** SDL3's CMake subproject runs its
+   own dependency searches inside our configure log — its lines are prefixed
+   `| ` and include scary "Could NOT find LibUSB / X11 / Wayland" messages that
+   are NOT xemu's results (they cost us a full wrong-diagnosis cycle on the
+   win64 build, twice). xemu's own results are the unprefixed
+   `Run-time dependency …` lines and the final summary block.
+8. **CLI `-loadvm` vs hotplugged devices.** The SBC controller is hotplugged
+   after machine init, so `-loadvm` at the command line dies with
+   `Unknown section or instance …usb-steel-battalion`. Always `loadvm` via the
+   monitor socket after boot (the `loc-bench-*.sh` launchers do this: launch,
+   sleep ~18 s, `printf "loadvm TAG\n" | nc -U /tmp/xemu-mon.sock`).
+9. **Compiler-skew false confidence.** The rig's GCC 13 only *warns* on
+   implicit function declarations; the win64 cross image's GCC 16 *errors*
+   (default since GCC 14). Code that builds clean on the rig can be unbuildable
+   everywhere modern — a missing prototype merged this way. Run the cross build
+   (or `-Werror=implicit-function-declaration` locally) before calling
+   anything done.
+
 ## Clean launch (full overlap stack, cold boot)
 
 `~/coldboot-play.sh` — kills stale emu, boots the DVD with the full stack

@@ -189,6 +189,59 @@ None open. Tier-1 MVP is signed off (OFP Elite, in-headset). The active front
 
 ---
 
+### ISS-B17 · Segfault on close with USB passthrough; config not saved · OPEN — not reproduced
+
+**Reported** 2026-07-27 by community passthrough users: xemu segfaults when
+closed, "something related to vulkan", and their config does not persist.
+
+**The two symptoms are one bug.** `ui/xemu.c:1379` saves settings via
+`atexit(xemu_settings_save)`, and **atexit handlers do not run on SIGSEGV**. The
+crash is eating the settings write; it is not a separate bug.
+
+**Not reproduced here.** Release build under gdb, booted, SIGTERM →
+`[Inferior 1 exited normally]`. So it is specific to the **UI close path**
+(window X / File→Exit) through the display thread's SDL event loop, not QEMU's
+signal handling. We have no passthrough hardware; reporters do — that is the
+obvious differentiator.
+
+**Two theories, both currently unsupported:**
+- *VK/GL interop teardown* — `pgraph_vk_finalize_display` → `destroy_present_slots`
+  calls `glDeleteTextures`/`glDeleteMemoryObjectsEXT` (`display.c:637,640,684,687`)
+  from `qemu_cleanup` on the main thread while the GL context belongs to the
+  display thread. Plausible, never observed.
+- *OHCI use-after-free* — **REFUTED.** The idea was that the per-endpoint port
+  frees a packet while libusb still holds `r->p` across an async
+  `libusb_cancel_transfer`. It does not: `host-libusb.c:1289-1291` sets
+  `r->p = NULL` *before* cancelling. Do not re-derive this.
+
+**Ruled out:** the VR compositor — it allocates only when an XR session exists,
+and shipped builds bundle no OpenXR loader.
+
+**The decisive evidence is timing**, and it is one question to the reporters:
+did the crash predate the 2026-07-27 19:36Z AppImage? Three Linux builds now
+exist with one variable each, so it is a clean A/B for them:
+
+| build | contains |
+|---|---|
+| `f48ceffb06` | libusb, **no** OHCI change |
+| `18af828a17` | + OHCI per-endpoint work |
+| `dee373f0e0` | + iovec leak fix (current) |
+
+Crash on the second but not the first ⇒ the OHCI port; crash on all three ⇒ it
+predates today's work. **Also still unknown: Windows or Linux?** The two have
+entirely different display paths and "vulkan" is a reporter's paraphrase.
+
+**Capture tooling is ready:** `tools/vr/run_xemu.sh --gdb` launches under gdb
+with `SIGTERM` passed through (without that, gdb halts on the signal and
+shutdown never runs — a wasted run), and writes a full backtrace plus all
+threads to `~/xemu-crash-<game>.log`. The operator must close the window
+*normally*; killing it will not reproduce.
+
+**Independent half-fix available:** saving settings on change rather than only
+at exit would preserve user config regardless of the crash.
+
+---
+
 ## P1 — title-specific
 
 ### ISS-B16 closure addendum (2026-07-26 late): the doorway light CLASSIFIED — legitimate

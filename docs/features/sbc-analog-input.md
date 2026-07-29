@@ -445,6 +445,83 @@ would remove.
 - `ohci_fix` (#1531), `LightGun`, `DeviceEmulation-ArcadeStick`, `deb`,
   `ppa-snapshot`.
 
+### 11a-bis. Verified against their code, 2026-07-28
+
+Everything in §11a above was taken from **their README's feature list**. This
+section is what the **code and commit history actually show**. Where the two
+disagree, this section wins.
+
+**Repo shape.** Parent is **`faha223/xemu`**, not xemu-project — they inherit
+that fork's PRs (#1803 SBC device, #1531 OHCI, LightGun) rather than upstream
+directly. The default branch `master` has been **documentation-only since
+2026-07-05** — 21 consecutive commits, every one editing `README.md` and
+nothing else. **All code lives on `usb_passthrough_vk`**, whose last code
+change was **2026-07-11** (the repo's recent "pushed" timestamps are README
+tweaks on master).
+
+**Hotkeys — they do not have hotkey infrastructure.** The entire change is
+one config key, `input.disable_hotkeys`, gating **upstream's existing**
+hotkeys behind `&& !g_config.input.disable_hotkeys`: F1 menu, F2 popup,
+F5–F8 snapshots, `` ` `` monitor, F10 RenderDoc, F11 fullscreen, F12
+screenshot (`ui/xui/main.cc:291-303`, `ui/xui/menubar.cc:82-95`). Plus
+`display.window.hide_cursor` and fullscreen options. Their own To-Do
+confirms the rest is unbuilt: *"Add Hotkey Rebinding"*, *"Make non-vulkan and
+vulkan have the same hotkeys"*. **This is a master off-switch, not a
+rebinding system** — worth knowing before assuming there is prior art here.
+
+**What is genuinely theirs and genuinely useful:** in-emulator **keyboard
+rebinding for the SBC** — a new `ui/xemu-controllers.{cc,h}` (259 lines) of
+rebind-capture classes (`SBCKeyboardRebindingMap`, `SBCRebindingMap`, gamepad
+equivalents) that write captured scancodes directly into the config map,
+backed by **~227 config keys** of binding surface. VK branch only.
+
+**Their headline bug is our documented invariant.** README: *"Keyboard Steel
+Battalion Controller does not rebind until restart."* That is **B6/I8** — the
+SBC keyboard map is a one-shot snapshot copied into a static array at init
+(`ui/xemu-input.c:303-399`) while the gamepad map is read live. They hit the
+wall and filed it; we hit it and wrote down the mechanism. **Our merge layer
+(W1) fixes it**, because live-reading is the whole point of the frame model.
+Likewise their To-Do *"gear shifter and tuner dial as individual selectors
+instead of incremental buttons"* is **B6/I12** — edge-stepped counters with
+no absolute-position input path. Two teams, opposite directions, same two
+design limits.
+
+**⚠ Their README's file map is wrong in both directions.** It lists five
+files; treat it as unreliable:
+- **`ui/xui/actions.cc` — *"Some notifications"* — is byte-identical to
+  upstream xemu master** (121 lines both sides, verified by content diff, not
+  by history). They never changed it.
+- It **omits the files containing the actual feature**: `ui/xemu-controllers.cc`
+  and `.h` (both new), `ui/xemu-input.{c,h}`, `ui/xemu-settings.{cc,h}`.
+- The parts that are real (`main.cc`, `menubar.cc`, `main-menu.cc`,
+  `config_spec.yml`) were last touched by **avibodek**, so the hotkey/menu
+  work is theirs rather than inherited.
+
+**History hygiene — this matters if we ever pull from them.**
+- **`ccache/` build cache is committed**: one commit adds 112
+  `ccache/…manifest` files. A later commit gitignores the directory, but the
+  objects are in history permanently.
+- **`:Zone.Identifier` files are committed** — Windows NTFS
+  alternate-data-stream markers created by downloading files. Their feature
+  commit carries a `:Zone.Identifier` twin for *every* source file it touches.
+- **Commit messages carry no information.** The real 2,129-line feature is
+  titled *"first commit"*; six others say only *"resolved merge conflicts"* —
+  and those merge-conflict commits are where the hotkey and menu features
+  actually landed.
+
+**Consequence — how to consume their work if we choose to.** Do **not**
+cherry-pick by commit and do **not** follow the file map. The only safe route
+is a **content diff** of `ui/xemu-controllers.*`, `ui/xemu-input.*`,
+`ui/xemu-settings.*` and `config_spec.yml` against the upstream base, read as
+a single lump. Their commit boundaries are not review units.
+
+**What is actually worth taking is the UX, not the code.** Their architecture
+— captured scancodes written straight into config — is precisely what
+produces the restart bug, so we should not copy it. But **227 keys of binding
+surface is a presentation problem they have already lived with**, and their
+menu layout is worth reading before we design ours (W1a's panel and the later
+calibration UI).
+
 ### 11b. A concrete two-way exchange
 
 **They do NOT have the #2514 DMA/surface-sync fix** — confirmed by two searches
@@ -464,7 +541,13 @@ Vulkan-only for VR and they are not.
 | we give | we take |
 |---|---|
 | **#2514 DMA/surface-sync port** — likely fixes their past-level-4 instability | **`VulkanLineLoopFix`** — line-loop rendering under Vulkan |
+| **The fix for their headline bug** — "does not rebind until restart" is B6/I8; our merge layer reads live (§11a-bis) | their **binding-surface UX** — 227 keys presented in a menu, a problem they have already lived with |
 | the VR layer (entirely ours) | passthrough experience (`enable_libusb`) |
+
+**And the gap our work closes for their users:** their README still tells
+people to run **JoystickGremlin** externally to reach a joystick, because
+*"directly binding to joysticks is currently not possible."* That is exactly
+what the merge layer removes.
 
 Platforms are complementary too: **they target Windows, we target Linux.**
 

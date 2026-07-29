@@ -45,6 +45,11 @@ important enough to state twice.
 - **WiVRn stop order (H-9):** never stop `wivrn-server` while a headset client
   is connected (26.6.1 segfaults). Recovery order: quit the emulator → close
   the headset client → restart the server.
+- **One logical change per commit (H-10).** We have shipped; history is a
+  **revert surface**, not a diary. Never bundle an upstream port with fixes on
+  top of it, a mechanical change with a behavioural one, or two independent
+  fixes. If the subject needs "and"/"plus", split it. Earned the day
+  `usb(ohci): ...plus two fixes` became unrevertable while under suspicion.
 - **Never claim we invented the core VR tech (H-7).** World-locked screen +
   reprojection is standard OpenXR; head-look camera injection is the
   flat2VR/UEVR lineage. Our claim is EXECUTION + the per-game grind + cadence.

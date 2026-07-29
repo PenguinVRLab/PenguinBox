@@ -326,3 +326,109 @@ while the depth soft particles sample is the *finished opaque scene*, for which
 one snapshot per frame is correct. Measured: copies/frame ~700 → **1–2**,
 renderpasses ~700 → **20–23**, mspf med **50.0** / p90 **50.9** — i.e. v9.3's
 performance with v9.3's bug removed.
+
+## Field observation (2026-07-28): the pre-fix wall reproduces inside a replay
+
+> **Platform note, added after this entry was first written: this screenshot
+> is from a Steam Deck, not the rig.** Every number and every fix referenced
+> below (v9.4, the S2T levers, the ~20fps verdict) was measured exclusively on
+> the rig's NVIDIA RTX 4050. This is the first Steam Deck data point this
+> project has, and it opens a **new platform campaign**:
+> [`docs/perf/deck/00-baseline.md`](../deck/00-baseline.md). Read that doc for
+> the platform-specific unknowns (different GPU vendor/driver stack, no PRIME
+> split, gamescope compositor, hardware-class mismatch) before assuming
+> anything below transfers.
+
+Screenshot supplied by the owner: Debug → Video overlay, open on a scene the
+owner describes as **"inside a replay"** — an AI battle (multiple VTs visible,
+heavy ground fog/haze) with the **"…S MAIN WEAPON BUTTON"** prompt on screen
+(almost certainly *"PRESS MAIN WEAPON BUTTON"*, the campaign's documented
+keyboard dead-end: SBC bits 0–2 are mouse-hardwired, no scancode exists for
+them — B6-input-stack.md P4). [DERIVED — the "replay"/cutscene identity is the
+owner's description plus visual context (logo watermark, non-interactive AI
+battle); not confirmed against code. Whether this is an attract-mode demo loop
+or an in-engine cutscene is exactly the ambiguity flagged as unresolved in
+`02-lessons-learned.md` open thread #4 ("attract/cutscene scenes") — this entry
+does not settle it.]
+
+**Counters read directly off the overlay** (last-completed-frame values, per
+the Advanced tree's per-frame legend):
+
+| | |
+|---|---|
+| FPS | 1 |
+| MSPF | **750** |
+| FINISH_SURFACE_DOWN | 71 |
+| FINISH_FLIP_STALL | 1 |
+| FINISH_SURFACE_CREATE | 1 |
+| PIPELINE_RENDERPASSES | **751** |
+| PIPELINE_BIND | 1247 |
+| PIPELINE_NOTDIRTY | 535 |
+| QUEUE_SUBMIT / _AUX | 73 / 83 |
+| BEGIN_ENDS | 1363 |
+| INLINE_BUFFERS / INLINE_ELEMENTS | 423 / 940 |
+| QUERY | 9 |
+| CLEAR | 5 |
+| all other FINISH_*, QUERY_*, REPORT_*, SHADER_GEN | 0 |
+
+The list was scrolled to the point where it cuts off at `SHADER_BIND: 1363` —
+**the S2T/ALIAS/ZC counter family (`SURF_TO_TEX`, `S2T_MISS_*`, `ALIAS_KEPT`,
+`ZC_*`) is below the visible area and was not captured.** This is the single
+biggest gap in this observation: without it we cannot see which S2T path (or
+fallback) produced the downloads, and we cannot confirm whether the S2T
+levers were even engaged for this run — no arming banner is visible in a
+screenshot of the overlay (the banners print to stderr, a different surface
+entirely). Re-capture with the log file, not just the overlay, next time.
+
+**Why this is worth logging on its own:** `MSPF=750` and
+`PIPELINE_RENDERPASSES=751` land almost exactly on the documented **pre-fix**
+baseline — "renderpasses ~700" / "median 3 (menu) → max 767 (scene)" from
+earlier in this document — not anywhere near the v9.4 verdict (renderpasses
+20–23, med mspf 50.0). Two explanations fit the data and neither is
+distinguishable from this screenshot alone:
+
+1. **This run had the S2T levers off** (default — they are opt-in, per A2,
+   and this could be any default launch: the shipped AppImage, a plain
+   `build.sh` binary, a Discord user's own build). If so, this is simply a
+   fresh, independent confirmation of the original wall's magnitude — useful
+   as a second baseline data point, not a regression.
+2. **This specific code path is not covered by the existing S2T fixes** — an
+   attract-mode/replay renderer that builds its geometry differently from
+   in-mission combat, falling through the same `S2T_MISS_*`/download-storm
+   class the campaign fixed elsewhere. If so, this is a **new, uncovered
+   wall**, not a re-measurement of the old one.
+
+**Open follow-up** (added to the ranked list below): re-run this exact scene
+with the five LoC levers explicitly set and `XEMU_SURF2TEX_DEBUG=1`, capturing
+the **log file** rather than the overlay, so the S2T counter family and the
+arming banners are both visible. If renderpasses collapse to the 20–23 band
+with flags on, explanation 1 holds and this is just a second confirmed data
+point for the pre-fix baseline. If they do not, explanation 2 holds and this
+"replay" scene is a new lever target. **This re-test now needs to happen on
+Deck specifically** (see the platform note above) — a rig re-test alone would
+no longer answer the question this screenshot actually raised.
+
+**Explanation 1, checked directly (2026-07-28): the fix IS in the shipped
+binary; nothing turns it on.** The obvious next question — "is this person on
+an old build?" — was checked against the actual artifact, not inferred from
+release dates. The public release `win64-preview-20260726` was *published*
+2026-07-27T07:49:56Z, before the LoC PR (#3) merged at 17:20:52Z that same
+day — but its **asset files were replaced later**
+(`PenguinBox-x86_64.AppImage` updated 2026-07-28T00:44:03Z, well after the
+merge). Downloading and grepping that AppImage's actual binary
+(`squashfs-root/usr/bin/qemu-system-i386`) confirms all five LoC lever
+strings are present: `XEMU_SURF2TEX_EXT`, `XEMU_SURF2TEX_ZEROCOPY`,
+`XEMU_SURF2TEX_FEEDBACK`, `XEMU_NO_SURF2TEX_FEEDBACK`,
+`XEMU_ALIAS_SURFACES`. **The currently-published build has the fix.**
+
+That makes "old version" the wrong frame entirely. The real mechanism,
+confirmed rather than assumed: all five levers default OFF
+(`docs/internal/A2-perf-levers.md`), and **nothing in the shipped product
+turns them on** — no config UI, no per-title profile (the gap G10/T8 already
+documented), no Steam launch-options preset. The result: **every normal
+launch, on every platform, on every build since the fix merged, reproduces
+this exact pre-fix wall** — not because the code is missing, but because the
+code that fixes it has never been switched on for anyone but us, on the rig,
+by hand. This is a stronger and more general finding than a Deck-specific or
+version-specific one — it is now ranked **item 1** (promoted above the
+validation-layer gap) in `02-lessons-learned.md`'s open-threads list.

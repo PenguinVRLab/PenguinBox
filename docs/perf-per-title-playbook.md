@@ -48,12 +48,48 @@ sinking effort into any new title's frame rate.
    canary — occlusion/readback results a game *consumes* must be correct, never
    stale), then owner eyes. Ship default-OFF until all pass.
 
+### 1b. The surface-traffic triage (added after the LoC campaign, 2026-07-27)
+
+If step 1 says pfifo-bound, decompose `pfifo:` further **before** reaching for
+the overlap stack — LoC's walls were entirely different from SB's, and the
+same buckets name them:
+
+- **`download` dominating** → surface traffic, not present. Sub-triage with
+  the always-on `S2T_MISS_*` counters (which class of surface-as-texture bind
+  is falling back) and `XEMU_SURF2TEX_DEBUG=1` geometry dumps (the actual
+  tex/surface shapes). Known classes and their shipped levers, all opt-in:
+  - reinterpretation binds (swizzled tex over linear surface, offsets,
+    tiles) → `XEMU_SURF2TEX_EXT` (Morton-bounce / quadrant / gather);
+  - eviction cascades from **memory aliasing** (game reuses one region — even
+    one base address — for multiple surface shapes; watch
+    `SURF_CREATE`/downloads ping-ponging) → `XEMU_ALIAS_SURFACES`;
+  - **feedback rendering** (sampling the still-bound target: cockpit-monitor
+    color feedback, and *soft-particle smoke sampling the bound depth* —
+    the visual tell is slowdown tracking smoke/haze/grain/post effects, NOT
+    unit count) → `XEMU_SURF2TEX_ZEROCOPY` + `XEMU_SURF2TEX_FEEDBACK`.
+- **`SURF_TO_TEX` (copy count) ≈ renderpass count ≈ mspf, per-frame** → the
+  copies themselves are the wall; check whether the consumer needs them
+  per-*draw* or per-*frame* (LoC's depth-as-texture needed one per frame;
+  the per-draw key was doing 700×).
+- **Depth-format caution**: any lever touching depth-as-texture must respect
+  the *decode chain* — Xbox `…DEPTH_Y16_FLOAT` textures expect raw bits that
+  the shader decodes; sampler-normalized depth views double-decode and corrupt
+  shadow comparisons. Bit-identical storage ≠ identical semantics.
+
+Method note that made this tractable: **put a reason-counter on every branch
+that rejects an optimization, and a rate-limited geometry dump on every
+surviving slow path** — each iteration then names its successor instead of
+guessing. And keep a **savevm of the worst scene** (loaded via monitor, not
+CLI — hotplugged devices break `-loadvm`): it turns every A/B into a
+90-second deterministic run.
+
 ## Outcome matrix
 
 | title profile | present-unlock verdict | best lever |
 |---|---|---|
 | pfifo-bound + time-based timestep | free higher fps | overlap stack, then unlock the cap |
 | pfifo-bound + fixed-timestep (SB) | 2× speed — do NOT | overlap stack for headroom/stability; frame-gen for true higher fps |
+| pfifo-bound, `download`-dominated (LoC) | n/a until surface traffic fixed | S2T levers (EXT/ALIAS/ZEROCOPY/FEEDBACK), *then* re-triage |
 | guest-CPU-bound | present work irrelevant | KVM / idle-skip / HLE (per-title) |
 
 ## Tooling worth building (catalog-level ROI, not per-game)

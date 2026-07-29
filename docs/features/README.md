@@ -22,6 +22,7 @@ the drill-down per feature.
 | **Gesture→button (backlog)** | velocity-gated pose recognizer → virtual pad | [02-gesture-mapping-concept.md](../vr/02-gesture-mapping-concept.md) (concept) |
 | **Graphical dumps (Shift+F8, pending)** | single-frame render-stream capture for Tier-2 stereo analysis (xemu analog of pcsx2's GS dump) | [graphical-dumps.md](graphical-dumps.md) (pending) |
 | **SBC cockpit input overlay (pending)** | in-game state + live-bindings panel for the Steel Battalion controller keyboard placeholder (gear/toggles/tuner/keys) | [sbc-cockpit-overlay.md](sbc-cockpit-overlay.md) (scoped, not built) |
+| **Real SBC controller, zero setup (planned)** | host-side libusb reader feeding the *emulated* SBC device, so a real controller works on launch with no Monitor commands and every feature (overlay, VR panel, calibration) keeps working | [sbc-zero-setup-plan.md](sbc-zero-setup-plan.md) (execution plan) + [sbc-input-plan.md](sbc-input-plan.md) (research) |
 
 ## Design-doc conventions
 

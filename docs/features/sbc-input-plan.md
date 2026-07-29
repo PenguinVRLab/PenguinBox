@@ -206,6 +206,46 @@ four implementations**, not a positive proof.
 4. **Windows** (community fork's platform): libusb **cannot detach on Windows at all** and needs a manual, admin-elevated **Zadig** WinUSB bind — which would also break any third-party SBC driver the user already installed. Low technical risk (class 0x58 has no in-box driver to steal from), real UX cost. Put the reader behind a thin platform interface and emit a *specific* error when the device is present but not WinUSB-bound.
 5. **Measurement**: xemu already writes per-device pcap in **the same format and clock basis as Linux usbmon** — capture both, diff in Wireshark, no instrumented build needed.
 
+6. **Hot-swap — TEST IT, then decide whether we offer it as a feature.**
+   *(Raised by the owner 2026-07-27; currently only recorded as an untested
+   assumption in the B6 spec's unknowns.)*
+
+   **The reframe that makes this worth testing:** hot-swap has two completely
+   different implementations, and we have been conflating them.
+   - **Device-level swap (qdev replug)** — changing a port's *driver* mid-run
+     does `qdev_unplug` + re-add, so the guest sees a USB disconnect and a new
+     enumeration. This is the one F4 says probably fails, because SB is
+     believed to enumerate controllers once at boot.
+   - **Source-level swap (the host-side reader architecture)** — the emulated
+     SBC device stays plugged the whole time and we only change *which frame
+     source feeds it*. **The guest never re-enumerates and cannot tell.** If
+     this holds, hot-swap is close to free, and it argues for a design rule:
+     **always instantiate the emulated SBC when a port is configured for it,
+     whether or not real hardware is attached.**
+
+   **Test A — source-level swap (the feature we would ship).** Needs the
+   reader (Phase 3) and a real controller.
+   1. Boot SB with port 1 = emulated SBC, keyboard-fed; confirm input in-game.
+   2. Mid-game, attach the real controller. Expect: input continues, now
+      sourced from the real device, **no guest-visible disconnect**.
+   3. Detach it. Expect: falls back to keyboard, still no disconnect.
+   Pass = zero re-enumeration and no input interruption at either edge →
+   hot-swap ships as a supported feature.
+
+   **Test B — device-level swap (the F4 hypothesis, and the suspected cause
+   of the long-standing "no input at the menu" symptom).** Needs no real
+   controller.
+   1. Boot SB with port 1 = Duke.
+   2. Mid-game, switch port 1's Emulated Device to Steel Battalion.
+   3. Does the game ever see it? Expected: **no**.
+   Result decides whether driver switching is allowed mid-run at all, or
+   whether the UI must force it pre-boot (and say so).
+
+   **Why the outcome matters for the "just launch" UX:** if Test A passes and
+   Test B fails, the correct product behavior is to decide the *device* before
+   boot and let the *source* float freely afterwards — which is exactly the
+   experience of plugging the controller in whenever you like.
+
 
 ---
 
