@@ -22,6 +22,8 @@ subdir('thirdparty')
 xemu_ss = ss.source_set()
 xemu_ss.add(files(
   'xemu-input.c',
+  'xemu-sbc-device.c',
+  'xemu-sim-profiles.c',
   'xemu-monitor.c',
   'xemu-net.c',
   'xemu-settings.cc',
@@ -36,6 +38,13 @@ xemu_ss.add(files(
 
 if host_os == 'windows'
   xemu_ss.add(nvapi)
+endif
+
+# The host-side Steel Battalion reader (xemu-sbc-device.c) is gated on
+# CONFIG_USB_LIBUSB exactly like hw/usb/host-libusb.c; without libusb the file
+# still compiles, to working no-ops.
+if libusb.found()
+  xemu_ss.add(libusb)
 endif
 
 subdir('xui')

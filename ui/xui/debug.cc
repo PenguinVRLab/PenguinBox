@@ -17,6 +17,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 #include <inttypes.h>
+#include "hw/xbox/nv2a/nv2a-renderer-status.h"
 #include "debug.hh"
 #include "common.hh"
 #include "misc.hh"
@@ -376,6 +377,11 @@ void DebugVideoWindow::Draw()
     m_prev_scale = g_viewport_mgr.m_scale;
 
     if (ImGui::Begin("Video Debug", &m_is_open)) {
+        if (nv2a_get_renderer_fallback_active()) {
+            ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s",
+                                nv2a_get_renderer_fallback_reason());
+            ImGui::Separator();
+        }
         double x_start, x_end;
         static ImPlotAxisFlags rt_axis = ImPlotAxisFlags_NoTickLabels;
         ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, ImVec2(5,5));
