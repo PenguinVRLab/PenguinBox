@@ -264,6 +264,7 @@ set -x # Print commands from now on
     --extra-ldflags="${sys_ldflags}" \
     --target-list=i386-softmmu \
     --enable-renderdoc \
+    --enable-libusb \
     ${opts} \
     "$@"
 
