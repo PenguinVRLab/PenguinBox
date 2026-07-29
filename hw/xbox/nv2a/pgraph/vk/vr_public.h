@@ -2,7 +2,7 @@
  * xemu-VR — UI-safe public surface (no target headers)
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * Includable from UI translation units (ui/xemu.c and the ui/xui sources),
  * which cannot see target-specific headers like pgraph.h/cpu.h. The

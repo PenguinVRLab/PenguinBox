@@ -30,4 +30,9 @@ unsigned int nv2a_get_surface_scale_factor(void);
 const uint8_t *nv2a_get_dac_palette(void);
 int nv2a_get_screen_off(void);
 
+/* Renderer-fallback status: declared in nv2a-renderer-status.h, a
+ * dependency-free header UI code can include without this one (which needs
+ * PCIBus/MemoryRegion in scope and is not standalone-includable). */
+#include "nv2a-renderer-status.h"
+
 #endif

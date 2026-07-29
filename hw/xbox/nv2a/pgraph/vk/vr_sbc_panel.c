@@ -2,7 +2,7 @@
  * xemu-VR — Steel Battalion in-headset cockpit console panel (content side)
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * WHAT THIS IS
  *   The virtual center console: a fixed 768x256 RGBA instrument panel that the

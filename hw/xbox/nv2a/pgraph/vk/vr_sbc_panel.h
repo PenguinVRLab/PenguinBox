@@ -2,7 +2,7 @@
  * xemu-VR — Steel Battalion in-headset cockpit console panel (public contract)
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * The CPU-rastered content side of the VR cockpit console: a fixed-size RGBA
  * surface the compositor uploads to a dedicated panel swapchain (a second

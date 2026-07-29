@@ -2,7 +2,7 @@
  * xemu-VR — internal state + interfaces between vr_* translation units
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * Included by vr_*.c only. Field names keep PCSX2 parity where it helps the
  * port review (docs/vr/01-port-map.md).

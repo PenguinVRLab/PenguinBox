@@ -1,6 +1,9 @@
 /*
  * QEMU USB XID Devices
  *
+ * SPDX-FileCopyrightText: 2026 Patrick Carey
+ * SPDX-License-Identifier: LGPL-2.0-or-later
+ * 
  * Copyright (c) 2013 espes
  * Copyright (c) 2017 Jannik Vogel
  * Copyright (c) 2018-2021 Matt Borgerson

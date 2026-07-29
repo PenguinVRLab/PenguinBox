@@ -2,7 +2,7 @@
  * xemu-VR — OpenXR runtime loader (dlopen + PFN table)
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * See vr_xr_loader.h for the loading model.
  */

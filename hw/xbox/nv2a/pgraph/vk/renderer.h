@@ -984,6 +984,8 @@ SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
 bool pgraph_vk_alias_surfaces_enabled(void);
 void pgraph_vk_surface_transition(PGRAPHState *pg, VkCommandBuffer cmd,
                                   SurfaceBinding *surface, VkImageLayout to);
+void pgraph_vk_surface_feedback_flush(PGRAPHState *pg, VkCommandBuffer cmd,
+                                      SurfaceBinding *surface);
 VkImageLayout pgraph_vk_surface_rest_layout(const SurfaceBinding *surface);
 void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);

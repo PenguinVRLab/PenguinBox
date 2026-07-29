@@ -2,7 +2,7 @@
  * xemu-VR — Tier-3 head-look camera driver + RAM-hunt support
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * Design: retro-vr-framework doc 10 §2 Tier 3 (find-and-poke) adapted to
  * xemu. The Xbox's 64 MB is unified and directly host-mapped

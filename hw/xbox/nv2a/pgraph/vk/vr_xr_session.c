@@ -2,7 +2,7 @@
  * xemu-VR — OpenXR instance/system/session + Vulkan-through-XR wrappers
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * C port of the team's PCSX2-VR XRSession.cpp (docs/vr/01-port-map.md §6 —
  * verdict V/A throughout; logic verbatim, xr* calls routed through the

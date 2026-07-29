@@ -2,7 +2,7 @@
  * xemu-VR — facade + Vulkan bridge seams
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * Port of the team's PCSX2-VR VRVulkanBridge (the emulator-glue layer —
  * rewritten against pgraph_vk's instance.c seams per docs/vr/01-port-map.md

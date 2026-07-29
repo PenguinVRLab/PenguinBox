@@ -2,7 +2,7 @@
  * xemu-VR — OpenXR runtime loader (dlopen + PFN table)
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * Port-map delta D1: unlike PCSX2 (statically linked vendored loader), xemu
  * dlopens the system OpenXR loader at runtime so the binary carries no hard

@@ -2,7 +2,7 @@
  * xemu-VR — XR frame pacing, swapchain, copy, quad layer
  *
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  *
  * C port of the team's PCSX2-VR XRCompositor.cpp (docs/vr/01-port-map.md §6;
  * logic verbatim, std::thread/mutex/atomic → qemu_thread/QemuMutex/qatomic,
