@@ -44,7 +44,9 @@
 #include "system/system.h"
 #include "xui/xemu-hud.h"
 #include "xemu-input.h"
+#include "xemu-sbc-device.h"
 #include "xemu-settings.h"
+#include "xemu-sim-profiles.h"
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
@@ -1407,13 +1409,46 @@ int main(int argc, char **argv)
 
     xemu_main_loop_lock();
     xemu_input_init();
+    /* Host-side Steel Battalion controller. Opt-in (XEMU_SBC_HOST_READER) and
+     * a no-op when libusb is absent or the flag is off, so this costs nothing
+     * in the default configuration. Its libusb pollfds attach to this thread's
+     * main loop, so it must be initialised here, alongside the input stack. */
+    /* Sim pre-flight gate (docs/features/sbc-zero-setup-plan.md §4 W1b). Armed
+     * here, right after the machine exists and well before the guest can map a
+     * title's XBE. It is handed the device layer's OWN answer for whether
+     * there is any hardware to check: with the reader off or libusb absent a
+     * recognised sim must still boot straight through (invariant 4). */
+    sim_gate_init(sbc_device_init());
     xemu_main_loop_unlock();
 
     struct xemu_console *scon = &scon_list[0];
+    uint64_t last_settings_flush = SDL_GetTicks();
     while (!qatomic_read(&qemu_exiting)) {
         poll_events(scon);
         gl_render_frame(scon);
+
+        /*
+         * Persist settings shortly after they change, rather than relying on
+         * the atexit() handler below being reached. A user remapping a pad saw
+         * it take effect immediately but never survive a restart, because
+         * g_config only reached disk on a CLEAN exit -- any crash or kill
+         * discarded the lot (ISS-B17).
+         *
+         * The call is a no-op when nothing changed, so this is a TOML render
+         * every 2s, not a write. Runs on the display thread, which is the same
+         * thread the UI mutates g_config from.
+         */
+        uint64_t now = SDL_GetTicks();
+        if (now - last_settings_flush >= 2000) {
+            last_settings_flush = now;
+            xemu_settings_save_if_changed();
+        }
     }
+    /* Before joining the QEMU thread: releases the device and its fd handlers
+     * while this loop still exists to unregister them from. */
+    xemu_main_loop_lock();
+    sbc_device_shutdown();
+    xemu_main_loop_unlock();
     qemu_sem_post(&display_shutdown_sem);
     qemu_thread_join(&thread);
     display_finalize();

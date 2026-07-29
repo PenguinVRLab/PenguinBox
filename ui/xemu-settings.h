@@ -63,6 +63,21 @@ bool xemu_settings_load(void);
 // Save config file to disk
 void xemu_settings_save(void);
 
+// Record the renderer actually requested (by the loaded config, or a live
+// user switch) BEFORE any fallback logic may overwrite g_config.display.renderer
+// for this session's active renderer. xemu_settings_save() restores this value
+// into g_config.display.renderer immediately before serializing, so a renderer
+// the emulator was forced into by an init failure is never what gets written
+// to disk — only a value the user (or their config file) actually asked for.
+// The restore happens ONLY in xemu_settings_save() (the true atexit path),
+// never in the periodic flush below.
+void xemu_settings_note_requested_renderer(CONFIG_DISPLAY_RENDERER r);
+
+// Save config file to disk only if it differs from the last write. Cheap enough
+// to call on a timer; returns true if a write actually happened. Does NOT
+// apply the requested-renderer restore above -- see xemu-settings.cc.
+bool xemu_settings_save_if_changed(void);
+
 static inline void xemu_settings_set_string(const char **str, const char *new_str)
 {
     assert(new_str);

@@ -39,6 +39,18 @@
 
 struct config g_config;
 
+/* -1 = no request ever noted (nothing to reconcile at save time — e.g. the
+ * renderer initialized clean and pgraph.c's init_renderer never had reason to
+ * call the setter... it always does, in fact, but the sentinel keeps this
+ * safe even if that ever changes). See xemu_settings_note_requested_renderer
+ * and its use in xemu_settings_save() below. */
+static CONFIG_DISPLAY_RENDERER g_requested_renderer = -1;
+
+void xemu_settings_note_requested_renderer(CONFIG_DISPLAY_RENDERER r)
+{
+    g_requested_renderer = r;
+}
+
 static const char *filename = "xemu.toml";
 static const char *settings_path;
 static std::string error_msg;
@@ -155,6 +167,11 @@ static const char *read_file(FILE *fd)
     return buf;
 }
 
+// Last TOML actually written to disk. Declared here rather than beside the
+// save routines because xemu_settings_load() seeds it, and load comes first.
+static std::string s_last_written_toml;
+static std::string xemu_settings_generate_toml(void);
+
 bool xemu_settings_load(void)
 {
     const char *settings_path = xemu_settings_get_path();
@@ -203,17 +220,33 @@ bool xemu_settings_load(void)
 
     config_tree.store_to_struct(&g_config);
 
+    /*
+     * Seed the durability snapshot with what is already on disk. Without this
+     * it starts empty, so the first periodic flush sees "changed" and rewrites
+     * the file even though nothing was touched -- clobbering any hand-edit made
+     * in that window. That matters here: the Steel Battalion keyboard map has no
+     * in-app rebind UI, so editing the TOML by hand IS the remap workflow.
+     */
+    s_last_written_toml = xemu_settings_generate_toml();
+
     return success;
 }
 
-void xemu_settings_save(void)
-{
-    FILE *fd = qemu_fopen(xemu_settings_get_path(), "wb");
-    if (!fd) {
-        fprintf(stderr, "Failed to open config file for writing. Check permissions.\n");
-        return;
-    }
+// Last TOML actually written to disk. Lets xemu_settings_save_if_changed()
+// detect edits without every mutation site having to flag itself dirty.
 
+// Render g_config to TOML. The locale must wrap GENERATION, not just the write:
+// float radix formatting happens inside generate_delta_toml().
+//
+// Deliberately does NOT restore g_requested_renderer (see
+// xemu_settings_apply_requested_renderer below) -- this function is now also
+// called by xemu_settings_save_if_changed() from the main-loop timer, live,
+// every ~2s for the whole session, and by xemu_settings_load() at startup.
+// Mutating g_config.display.renderer from here would silently rewrite it out
+// from under an ACTIVELY RUNNING fallback renderer on every periodic flush,
+// not just once at exit.
+static std::string xemu_settings_generate_toml(void)
+{
     char *previous_numeric_locale = setlocale(LC_NUMERIC, NULL);
     if (previous_numeric_locale) {
         previous_numeric_locale = g_strdup(previous_numeric_locale);
@@ -228,13 +261,78 @@ void xemu_settings_save(void)
     g_config.input.allow_vibration = true;
 
     config_tree.update_from_struct(&g_config);
-    fprintf(fd, "%s", config_tree.generate_delta_toml().c_str());
-    fclose(fd);
+    std::string toml = config_tree.generate_delta_toml();
 
     if (previous_numeric_locale) {
         setlocale(LC_NUMERIC, previous_numeric_locale);
         g_free(previous_numeric_locale);
     }
+
+    return toml;
+}
+
+// g_config.display.renderer may currently hold a renderer the emulator was
+// FORCED into by an init failure this session (pgraph.c's init_renderer), not
+// one anybody asked for. Restore the actually-requested value so a transient
+// failure never persists as a permanent downgrade.
+//
+// Call ONLY from the true exit path (xemu_settings_save() below), never from
+// the periodic flush or the load-time snapshot seed: mutating g_config here is
+// safe exactly because save()'s only call site is atexit(), so nothing reads
+// g_config again afterward. That safety condition does NOT hold for
+// save_if_changed(), which runs mid-session while the game is still rendering.
+static void xemu_settings_apply_requested_renderer(void)
+{
+    if (g_requested_renderer >= 0) {
+        g_config.display.renderer = g_requested_renderer;
+    }
+}
+
+static bool xemu_settings_write_toml(const std::string &toml)
+{
+    FILE *fd = qemu_fopen(xemu_settings_get_path(), "wb");
+    if (!fd) {
+        fprintf(stderr, "Failed to open config file for writing. Check permissions.\n");
+        return false;
+    }
+
+    fprintf(fd, "%s", toml.c_str());
+    fclose(fd);
+    return true;
+}
+
+void xemu_settings_save(void)
+{
+    xemu_settings_apply_requested_renderer();
+    std::string toml = xemu_settings_generate_toml();
+    if (xemu_settings_write_toml(toml)) {
+        s_last_written_toml = toml;
+    }
+}
+
+// Persist only if something actually changed since the last write.
+//
+// Settings used to reach disk from exactly ONE place: atexit(xemu_settings_save)
+// in ui/xemu.c. Everything a user did -- remapping a pad, changing a display
+// option -- lived only in g_config until the process exited cleanly, so an
+// abnormal exit silently discarded all of it. Reported by a user whose remap
+// "worked right there" but never survived (ISS-B17).
+//
+// Change is detected by comparing rendered TOML rather than by dirty flags, so
+// no mutation site has to remember to mark anything -- the failure mode of a
+// flag-based scheme is the same silent loss this fixes. The config is a few KB;
+// rendering it on a slow cadence is free next to a frame.
+bool xemu_settings_save_if_changed(void)
+{
+    std::string toml = xemu_settings_generate_toml();
+    if (toml == s_last_written_toml) {
+        return false;
+    }
+    if (!xemu_settings_write_toml(toml)) {
+        return false;
+    }
+    s_last_written_toml = toml;
+    return true;
 }
 
 void add_net_nat_forward_ports(int host, int guest, CONFIG_NET_NAT_FORWARD_PORTS_PROTOCOL protocol)
