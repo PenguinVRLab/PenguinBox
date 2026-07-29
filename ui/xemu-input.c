@@ -985,7 +985,7 @@ bool xemu_input_keyboard_feeds_sbc(void)
     return xemu_input_get_keyboard_sbc() != NULL;
 }
 
-void xemu_input_bind(int index, ControllerState *state, int save)
+void xemu_input_bind(int index, ControllerState *state, int live_apply_flag)
 {
 
     if (bound_controllers[index]) {
@@ -1012,7 +1012,7 @@ void xemu_input_bind(int index, ControllerState *state, int save)
         bound_controllers[index] = NULL;
     }
 
-    if (save) {
+    if (live_apply_flag) {
         char guid_buf[35] = { 0 };
         if (state) {
             if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {

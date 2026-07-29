@@ -224,7 +224,7 @@ ControllerState *xemu_input_get_bound(int index);
 bool xemu_input_keyboard_feeds_sbc(void);
 
 ControllerState *xemu_input_get_keyboard_sbc(void);
-void xemu_input_bind(int index, ControllerState *state, int save);
+void xemu_input_bind(int index, ControllerState *state, int live_apply_flag);
 bool xemu_input_bind_xmu(int player_index, int peripheral_port_index,
                          const char *filename, bool is_rebind);
 void xemu_input_rebind_xmu(int port);
