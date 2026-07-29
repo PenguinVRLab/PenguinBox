@@ -310,13 +310,15 @@ void SbcOverlayDraw(void)
         AxisMeter("Y", sbc.axis[SBC_AXIS_AIMING_Y]);
         AxisMeter("ROT", sbc.axis[SBC_AXIS_ROTATION_LEVER]);
 
-        if (ImGui::CollapsingHeader(
-                "All controls",
-                g_config.display.ui.sbc_overlay.show_all_controls ?
-                    ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+        ImGui::Separator();
+        if (g_config.display.ui.sbc_overlay.show_all_controls) {
+            ImGui::TextColored(kDim, "ALL CONTROLS");
             ButtonRow(g_rest, std::size(g_rest), sbc.buttons, 3);
             ImGui::Separator();
             ButtonRow(g_axis_keys, std::size(g_axis_keys), 0, 3);
+        } else {
+            ImGui::TextColored(kDim, "+%zu more \xe2\x80\x94 View menu",
+                               std::size(g_rest) + std::size(g_axis_keys));
         }
     }
     ImGui::End();
