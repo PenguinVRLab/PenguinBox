@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: 2026 Patrick Carey
- * SPDX-License-Identifier: LGPL-2.0-or-later
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef HW_XBOX_NV2A_PGRAPH_VK_VR_XR_LOADER_H

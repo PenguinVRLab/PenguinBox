@@ -22,6 +22,7 @@
 #include <math.h>
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "hw/xbox/nv2a/nv2a-renderer-status.h"
 #include "exec/xemu-guest-profile.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
@@ -217,6 +218,19 @@ void pgraph_renderer_register(const PGRAPHRenderer *renderer)
     renderers[renderer->type] = renderer;
 }
 
+static bool g_renderer_fallback_active;
+static gchar *g_renderer_fallback_reason;
+
+bool nv2a_get_renderer_fallback_active(void)
+{
+    return g_renderer_fallback_active;
+}
+
+const char *nv2a_get_renderer_fallback_reason(void)
+{
+    return g_renderer_fallback_reason ? g_renderer_fallback_reason : "";
+}
+
 void pgraph_init(NV2AState *d)
 {
     g_nv2a = d;
@@ -316,7 +330,12 @@ static bool attempt_renderer_init(PGRAPHState *pg)
 
 static void init_renderer(PGRAPHState *pg)
 {
+    CONFIG_DISPLAY_RENDERER requested = g_config.display.renderer;
+    xemu_settings_note_requested_renderer(requested);
+
     if (attempt_renderer_init(pg)) {
+        g_renderer_fallback_active = false;
+        g_clear_pointer(&g_renderer_fallback_reason, g_free);
         return;
     }
 
@@ -324,9 +343,32 @@ static void init_renderer(PGRAPHState *pg)
     if (default_renderer != g_config.display.renderer) {
         g_config.display.renderer = default_renderer;
         if (attempt_renderer_init(pg)) {
-            g_autofree gchar *msg = g_strdup_printf(
-                "Switched to default renderer: %s", pg->renderer->name);
-            xemu_queue_notification(msg);
+            bool vr_wanted =
+                g_config.vr.enable && requested == CONFIG_DISPLAY_RENDERER_VULKAN;
+
+            g_renderer_fallback_active = true;
+            g_free(g_renderer_fallback_reason);
+            g_renderer_fallback_reason = g_strdup_printf(
+                "Vulkan failed to initialize; running on %s this session only."
+                "%s Your saved renderer setting has NOT been changed — this "
+                "will retry Vulkan on next launch.",
+                pg->renderer->name,
+                vr_wanted ? " VR requires Vulkan and IS INACTIVE this session."
+                          : "");
+
+            fprintf(stderr,
+                    "\n"
+                    "==================== RENDERER FALLBACK ====================\n"
+                    "%s\n"
+                    "=============================================================\n\n",
+                    g_renderer_fallback_reason);
+            if (vr_wanted) {
+                fprintf(stderr,
+                        "xemu: VR WAS REQUESTED BUT VULKAN FAILED — VR IS "
+                        "INACTIVE THIS SESSION. Fix the Vulkan driver/GPU "
+                        "setup and relaunch.\n");
+            }
+            xemu_queue_notification(g_renderer_fallback_reason);
             return;
         }
     }
