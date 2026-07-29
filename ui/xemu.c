@@ -44,7 +44,9 @@
 #include "system/system.h"
 #include "xui/xemu-hud.h"
 #include "xemu-input.h"
+#include "xemu-sbc-device.h"
 #include "xemu-settings.h"
+#include "xemu-sim-profiles.h"
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
@@ -1326,13 +1328,24 @@ int main(int argc, char **argv)
 
     xemu_main_loop_lock();
     xemu_input_init();
+    sim_gate_init(sbc_device_init());
     xemu_main_loop_unlock();
 
     struct xemu_console *scon = &scon_list[0];
+    uint64_t last_settings_flush = SDL_GetTicks();
     while (!qatomic_read(&qemu_exiting)) {
         poll_events(scon);
         gl_render_frame(scon);
+
+        uint64_t now = SDL_GetTicks();
+        if (now - last_settings_flush >= 2000) {
+            last_settings_flush = now;
+            xemu_settings_save_if_changed();
+        }
     }
+    xemu_main_loop_lock();
+    sbc_device_shutdown();
+    xemu_main_loop_unlock();
     qemu_sem_post(&display_shutdown_sem);
     qemu_thread_join(&thread);
     display_finalize();

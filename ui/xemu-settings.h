@@ -56,6 +56,10 @@ bool xemu_settings_load(void);
 
 void xemu_settings_save(void);
 
+void xemu_settings_note_requested_renderer(CONFIG_DISPLAY_RENDERER r);
+
+bool xemu_settings_save_if_changed(void);
+
 static inline void xemu_settings_set_string(const char **str, const char *new_str)
 {
     assert(new_str);

@@ -39,6 +39,13 @@
 
 struct config g_config;
 
+static CONFIG_DISPLAY_RENDERER g_requested_renderer = -1;
+
+void xemu_settings_note_requested_renderer(CONFIG_DISPLAY_RENDERER r)
+{
+    g_requested_renderer = r;
+}
+
 static const char *filename = "xemu.toml";
 static const char *settings_path;
 static std::string error_msg;
@@ -155,6 +162,9 @@ static const char *read_file(FILE *fd)
     return buf;
 }
 
+static std::string s_last_written_toml;
+static std::string xemu_settings_generate_toml(void);
+
 bool xemu_settings_load(void)
 {
     const char *settings_path = xemu_settings_get_path();
@@ -202,17 +212,13 @@ bool xemu_settings_load(void)
 
     config_tree.store_to_struct(&g_config);
 
+    s_last_written_toml = xemu_settings_generate_toml();
+
     return success;
 }
 
-void xemu_settings_save(void)
+static std::string xemu_settings_generate_toml(void)
 {
-    FILE *fd = qemu_fopen(xemu_settings_get_path(), "wb");
-    if (!fd) {
-        fprintf(stderr, "Failed to open config file for writing. Check permissions.\n");
-        return;
-    }
-
     char *previous_numeric_locale = setlocale(LC_NUMERIC, NULL);
     if (previous_numeric_locale) {
         previous_numeric_locale = g_strdup(previous_numeric_locale);
@@ -223,13 +229,56 @@ void xemu_settings_save(void)
     g_config.input.allow_vibration = true;
 
     config_tree.update_from_struct(&g_config);
-    fprintf(fd, "%s", config_tree.generate_delta_toml().c_str());
-    fclose(fd);
+    std::string toml = config_tree.generate_delta_toml();
 
     if (previous_numeric_locale) {
         setlocale(LC_NUMERIC, previous_numeric_locale);
         g_free(previous_numeric_locale);
     }
+
+    return toml;
+}
+
+static void xemu_settings_apply_requested_renderer(void)
+{
+    if (g_requested_renderer >= 0) {
+        g_config.display.renderer = g_requested_renderer;
+    }
+}
+
+static bool xemu_settings_write_toml(const std::string &toml)
+{
+    FILE *fd = qemu_fopen(xemu_settings_get_path(), "wb");
+    if (!fd) {
+        fprintf(stderr, "Failed to open config file for writing. Check permissions.\n");
+        return false;
+    }
+
+    fprintf(fd, "%s", toml.c_str());
+    fclose(fd);
+    return true;
+}
+
+void xemu_settings_save(void)
+{
+    xemu_settings_apply_requested_renderer();
+    std::string toml = xemu_settings_generate_toml();
+    if (xemu_settings_write_toml(toml)) {
+        s_last_written_toml = toml;
+    }
+}
+
+bool xemu_settings_save_if_changed(void)
+{
+    std::string toml = xemu_settings_generate_toml();
+    if (toml == s_last_written_toml) {
+        return false;
+    }
+    if (!xemu_settings_write_toml(toml)) {
+        return false;
+    }
+    s_last_written_toml = toml;
+    return true;
 }
 
 void add_net_nat_forward_ports(int host, int guest, CONFIG_NET_NAT_FORWARD_PORTS_PROTOCOL protocol)
