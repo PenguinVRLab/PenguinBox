@@ -60,6 +60,13 @@ input:
     type: bool
     default: true
   background_input_capture: bool
+  # Pre-flight check before a "sim" title boots (Steel Battalion, Line of
+  # Contact, ...): the controller diagnostics panel opens as a checklist and
+  # the VM stays paused until Continue or Skip.
+  # Off => the title probe never runs at all.
+  sim_preflight_gate:
+    type: bool
+    default: true
   keyboard_controller_scancode_map:
     # Scancode reference : https://github.com/libsdl-org/SDL/blob/main/include/SDL_scancode.h
     a:
