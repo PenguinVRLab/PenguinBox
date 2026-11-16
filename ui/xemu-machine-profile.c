@@ -13,6 +13,7 @@
 #include "hw/boards.h"
 #include "hw/ide/atapi-read-patch.h"
 #include "xemu-machine-profile.h"
+#include "xemu-sim-boot.h"
 #include "xemu-yaml-lite.h"
 #include "xemu-settings.h"
 #include "xemu-notifications.h"
@@ -571,6 +572,7 @@ int xemu_machine_profile_restart(char *err, size_t errlen)
         g_free(args);
         return -1;
     }
+    xemu_sim_boot_export_for_restart();
     fprintf(stderr, "system-memory: restarting PenguinBox to apply the system memory size\n");
     fflush(NULL);
 #if defined(_WIN32)

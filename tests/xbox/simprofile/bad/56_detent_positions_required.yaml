@@ -1,0 +1,9 @@
+# BAD fixture (work/0039): device_shifter.yaml with one change: the gate has no positions. Load the good set with this file IN PLACE OF
+# device_shifter.yaml; it must be refused with DETENT_POSITIONS_REQUIRED.
+schema: sim-profile/1
+kind: device
+id: th8a
+source: sdl_joystick
+template: shifter_v1
+inputs:
+  - { id: gate, kind: detent }

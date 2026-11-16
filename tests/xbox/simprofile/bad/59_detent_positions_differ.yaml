@@ -1,0 +1,12 @@
+# BAD fixture (work/0039): bindings_sbc_levers.yaml with one change: the gear lever drives the tuner dial. Load the good set with this file IN PLACE OF
+# bindings_sbc_levers.yaml; it must be refused with DETENT_POSITIONS_DIFFER (7 gear positions against 16 tuner positions).
+# The shipped Steel Battalion controller's two levers on the emulated ones (S-80): lever -> lever between identical
+# positions, the reading passed straight through (the gear lever's 0 between gears too: the owner, "option c").
+schema: sim-profile/1
+kind: bindings
+id: sbc_levers
+device: steel_battalion_controller
+target: steel_battalion
+bind:
+  - { source: gear_lever, target: tuner_dial }
+  - { source: tuner_dial, target: tuner_dial }

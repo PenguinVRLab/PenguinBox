@@ -1,0 +1,10 @@
+# The shipped Steel Battalion controller's two levers on the emulated ones (S-80): lever -> lever between identical
+# positions, the reading passed straight through (the gear lever's 0 between gears too: the owner, "option c").
+schema: sim-profile/1
+kind: bindings
+id: sbc_levers
+device: steel_battalion_controller
+target: steel_battalion
+bind:
+  - { source: gear_lever, target: gear_lever }
+  - { source: tuner_dial, target: tuner_dial }

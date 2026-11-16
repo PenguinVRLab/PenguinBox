@@ -46,12 +46,14 @@
 #include "xemu-input.h"
 #include "xemu-sbc-device.h"
 #include "xemu-settings.h"
+#include "xemu-sim-boot.h"
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
 #ifdef CONFIG_VULKAN
 #include "hw/xbox/nv2a/pgraph/vk/vr_public.h"
 #include "hw/xbox/nv2a/pgraph/vk/vr_sbc_panel.h"
+#include "hw/xbox/nv2a/pgraph/vk/gpu_choice.h"
 #endif
 
 #include "data/xemu_64x64.png.h"
@@ -891,7 +893,8 @@ static void poll_events(struct xemu_console *scon)
                 (ev->key.mod & SDL_KMOD_CTRL)) {
                 xemu_vr_request_recenter();
             }
-            if (!xemu_input_keyboard_feeds_sbc()) {
+            if (!xemu_input_keyboard_feeds_sbc() &&
+                !xemu_sim_boot_hotkey_held(ev->key.scancode)) {
                 if (ev->key.scancode == SDL_SCANCODE_F8 &&
                     !(ev->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT))) {
                     xemu_vr_request_recenter();
@@ -1073,6 +1076,9 @@ static void display_very_early_init(DisplayOptions *o)
     fprintf(stderr, "GL_RENDERER: %s\n", glGetString(GL_RENDERER));
     fprintf(stderr, "GL_VERSION: %s\n", glGetString(GL_VERSION));
     fprintf(stderr, "GL_SHADING_LANGUAGE_VERSION: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+#ifdef CONFIG_VULKAN
+    xemu_gpu_note_gl();
+#endif
 
     nv2a_context_init();
     SDL_GL_MakeCurrent(NULL, NULL);
@@ -1317,6 +1323,9 @@ int main(int argc, char **argv)
         SDL_Quit();
         exit(1);
     }
+#ifdef CONFIG_VULKAN
+    xemu_gpu_start();
+#endif
     atexit(xemu_settings_save);
 #ifdef CONFIG_VULKAN
     vr_sbc_panel_gloves_init();

@@ -1,0 +1,7 @@
+schema: sim-profile/1
+kind: bindings
+id: pgr2_shifter
+device: th8a
+target: xbox_duke
+bind:
+  - { source: gate, target: black, position: 1 }

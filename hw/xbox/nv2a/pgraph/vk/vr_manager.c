@@ -8,6 +8,7 @@
 #include "renderer.h"
 #include "vr.h"
 #include "vr_internal.h"
+#include "gpu_choice.h"
 #include "vr_ui_panel.h"
 
 XemuVRState g_xemu_vr;
@@ -79,6 +80,44 @@ VkPhysicalDevice xemu_vr_get_physical_device(VkInstance instance)
                         "aborting VR, using xemu's own selection.\n");
         vr_abort_bootstrap();
         return pd;
+    }
+
+    {
+        VkPhysicalDeviceProperties id_props;
+        uint8_t gl_uuid[GPU_SELECT_UUID_SIZE];
+        uint8_t xr_uuid[GPU_SELECT_UUID_SIZE] = { 0 };
+        bool gl_known = xemu_gpu_gl_uuid(gl_uuid);
+        bool xr_known = false;
+
+        vkGetPhysicalDeviceProperties(pd, &id_props);
+        if (id_props.apiVersion >= VK_API_VERSION_1_1) {
+            VkPhysicalDeviceIDProperties id = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+            };
+            VkPhysicalDeviceProperties2 props2 = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &id,
+            };
+            vkGetPhysicalDeviceProperties2(pd, &props2);
+            memcpy(xr_uuid, id.deviceUUID, GPU_SELECT_UUID_SIZE);
+            xr_known = true;
+        }
+        switch (gpu_select_vr_gate(xr_known ? xr_uuid : NULL,
+                                   gl_known ? gl_uuid : NULL)) {
+        case GPU_SELECT_VR_REFUSE:
+            xemu_gpu_note_vr_refused(id_props.deviceName);
+            vr_abort_bootstrap();
+            return VK_NULL_HANDLE;
+        case GPU_SELECT_VR_ALLOW:
+            fprintf(stderr, "gpu: vr: the headset runtime's GPU '%s' is the "
+                            "GPU OpenGL is on\n", id_props.deviceName);
+            return pd;
+        default:
+            fprintf(stderr, "gpu: vr: the headset runtime's GPU '%s' cannot "
+                            "be compared with OpenGL's by device UUID; "
+                            "comparing names\n", id_props.deviceName);
+            break;
+        }
     }
 
     const char *want = g_config.display.vulkan.preferred_physical_device;

@@ -122,6 +122,81 @@ int16_t sim_merge_sbc_aiming_axis(double wire)
     return (int16_t)q;
 }
 
+#define DETENT_UNLISTED_SPAN 549755813888.0
+
+static char position_kind(const SimInput *lever, int i)
+{
+    return lever->position_kinds ? lever->position_kinds[i] : 'S';
+}
+
+double sim_merge_detent_int(const SimInput *lever, long long reading)
+{
+    for (int i = 0; lever && i < lever->npositions; i++) {
+        if (position_kind(lever, i) == 'I' && lever->position_ints && lever->position_ints[i] == reading) {
+            return (double)i;
+        }
+    }
+    if (reading <= -(long long)DETENT_UNLISTED_SPAN || reading >= (long long)DETENT_UNLISTED_SPAN) {
+        return -1.0;
+    }
+    return SIM_DETENT_UNLISTED + (double)reading;
+}
+
+double sim_merge_detent_text(const SimInput *lever, const char *reading)
+{
+    for (int i = 0; lever && reading && i < lever->npositions; i++) {
+        if (position_kind(lever, i) == 'S' && !strcmp(lever->positions[i], reading)) {
+            return (double)i;
+        }
+    }
+    return -1.0;
+}
+
+double sim_merge_hat_value(double x, double y)
+{
+    unsigned bits = 0;
+    if (isfinite(x)) {
+        bits |= x < 0 ? SIM_HAT_LEFT : x > 0 ? SIM_HAT_RIGHT : 0u;
+    }
+    if (isfinite(y)) {
+        bits |= y < 0 ? SIM_HAT_UP : y > 0 ? SIM_HAT_DOWN : 0u;
+    }
+    return (double)bits;
+}
+
+static bool detent_decode(const SimInput *lever, double v, int *index, long long *unlisted)
+{
+    *index = -1;
+    if (!isfinite(v) || v != floor(v)) {
+        return false;
+    }
+    if (v >= 0 && v < lever->npositions) {
+        *index = (int)v;
+        return true;
+    }
+    double r = v - SIM_DETENT_UNLISTED;
+    if (r > -DETENT_UNLISTED_SPAN && r < DETENT_UNLISTED_SPAN) {
+        double i = sim_merge_detent_int(lever, (long long)r);
+        if (i >= 0 && i < SIM_DETENT_UNLISTED - DETENT_UNLISTED_SPAN) {
+            *index = (int)i;
+        } else {
+            *unlisted = (long long)r;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool is_binding_position(const SimInput *s, const SimBinding *b, int i)
+{
+    for (int j = 0; j < s->npositions; j++) {
+        if (s->positions[j] == b->position) {
+            return j == i;
+        }
+    }
+    return !strcmp(s->positions[i], b->position);
+}
+
 typedef struct MBind {
     const SimBinding *b;
     const SimPortDevice *dev;
@@ -164,6 +239,7 @@ static int out_index(SimMerge *m, const SimInput *control)
     memset(&m->out[m->nout], 0, sizeof(*m->out));
     m->out[m->nout].control = control;
     m->out[m->nout].bound = true;
+    m->out[m->nout].position = -1;
     return m->nout++;
 }
 
@@ -385,6 +461,9 @@ void sim_merge_update_dt(SimMerge *m, const double *const *values, double dt_ms)
     for (int i = 0; i < m->nout; i++) {
         m->out[i].canonical = 0.0;
         m->out[i].pressed = false;
+        m->out[i].has_reading = false;
+        m->out[i].position = -1;
+        m->out[i].raw = 0.0;
         m->best[i] = 0.0;
         if (m->st[i].has_keys) {
             keys_advance(m, i, dt_ms);
@@ -464,8 +543,26 @@ void sim_merge_update_dt(SimMerge *m, const double *const *values, double dt_ms)
             break;
         }
         case SIM_IN_DETENT: {
-            int idx = raw >= 0 && raw < s->npositions ? (int)raw : -1;
-            if (b->position && idx >= 0 && !strcmp(s->positions[idx], b->position)) {
+            int idx;
+            long long unlisted = 0;
+            bool reading = detent_decode(s, raw, &idx, &unlisted);
+            if (t->kind == SIM_IN_DETENT) {
+                SimMergeOut *o = &m->out[mb->out];
+                if (reading && !o->has_reading) {
+                    o->has_reading = true;
+                    o->position = idx;
+                    if (idx < 0) {
+                        o->raw = (double)unlisted;
+                    } else if (position_kind(s, idx) == 'I' && s->position_ints) {
+                        o->raw = (double)s->position_ints[idx];
+                    } else {
+                        o->raw = 0.0;
+                    }
+                    o->canonical = o->raw;
+                }
+                break;
+            }
+            if (b->position && idx >= 0 && is_binding_position(s, b, idx)) {
                 offer_press(m, mb->out, 1.0);
             }
             break;
@@ -506,6 +603,8 @@ void sim_merge_update_dt(SimMerge *m, const double *const *values, double dt_ms)
         } else if (o->control->kind == SIM_IN_BUTTON && o->control->analog) {
             tr = o->control->analog_range;
             o->raw = sim_merge_round(sim_merge_denormalise(tr, o->canonical), tr.rest);
+        } else if (o->control->kind == SIM_IN_DETENT) {
+            o->pressed = false;
         } else {
             o->raw = o->pressed ? 1.0 : 0.0;
             o->canonical = o->pressed ? 1.0 : 0.0;

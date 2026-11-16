@@ -1,0 +1,17 @@
+# Steel Battalion: the mouse as the aiming lever (work/0020; owner, 2026-10-09). The lever does not spring back to
+# centre (profile/calibration.py NON_RECENTRING), so mouse motion is INTEGRATED into a position that stays where it
+# was left: `counts_per_travel` counts of motion sweep the lever from one end to the other, and the middle button
+# puts it back at rest. That arithmetic is the emulator's to define (docs/decisions.md O-23); this file records the
+# intent. The buttons follow the emulator's own keyboard-and-mouse SBC driver (xemu_vr ui/xemu-input.c:716-727):
+# left = main weapon, right = lock-on, a side button = sub weapon.
+schema: sim-profile/1
+kind: bindings
+id: sb_mouse_aim
+device: desk_mouse
+target: steel_battalion
+bind:
+  - { source: rel_x, targets: [aiming_x, aiming_y], policy: split }
+  - { source: rel_y, target: aiming_y, response: { mode: integrate, counts_per_travel: 2000, recentre: middle } }
+  - { source: left, target: main_weapon }
+  - { source: right, target: lock_on }
+  - { source: side, target: sub_weapon }

@@ -27,12 +27,19 @@ double sim_merge_policy(SimPolicy p, bool from_bipolar, double c, int which);
 double sim_merge_round(double v, double rest);
 int16_t sim_merge_sbc_aiming_axis(double wire);
 
+#define SIM_DETENT_UNLISTED 1099511627776.0
+double sim_merge_detent_int(const SimInput *lever, long long reading);
+double sim_merge_detent_text(const SimInput *lever, const char *reading);
+double sim_merge_hat_value(double x, double y);
+
 typedef struct SimMergeOut {
     const SimInput *control;
     bool bound;
     double canonical;
     double raw;
     bool pressed;
+    bool has_reading;
+    int position;
 } SimMergeOut;
 
 typedef struct SimMerge SimMerge;

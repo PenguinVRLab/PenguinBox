@@ -1,0 +1,9 @@
+# BAD fixture (work/0039): calibration_pedals.yaml with one change: the accel max is 40000, past the device's declared 32767. Load the good set with this file IN PLACE OF
+# calibration_pedals.yaml; it must be refused with CALIBRATION_OUT_OF_RANGE.
+schema: sim-profile/1
+kind: calibration
+id: pedals_unit_a
+device: racing_pedals
+port_path: pci-0000:00:14.0-usb-0:3:1.0
+inputs:
+  accel: { min: -32768, rest: -32768, max: 40000 }

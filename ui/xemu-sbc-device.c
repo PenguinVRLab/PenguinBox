@@ -45,6 +45,8 @@
 #define SBC_LOG_PREFIX "sbc-host-reader: "
 
 #define SBC_DEFAULT_EP_IN 0x82
+#define SBC_DEFAULT_EP_OUT 0x01
+#define SBC_OUT_TIMEOUT_MS 1000
 #define SBC_DEFAULT_INTERFACE 0
 
 #define SBC_XFER_COUNT 3
@@ -79,6 +81,9 @@ typedef struct SbcCaptureFrame {
 typedef struct SbcDeviceCtx {
     bool module_ready;
     bool reader_live;
+    bool serving;
+    bool serve_started;
+    bool serve_lost;
 
     SbcSource source;
     SbcDeviceStatus status;
@@ -103,6 +108,15 @@ typedef struct SbcDeviceCtx {
     uint64_t replay_cursor_us;
     char replay_path[512];
 
+    uint8_t out_last[SBC_XFER_BUFSZ];
+    size_t out_last_len;
+    bool out_have;
+    uint64_t out_sent, out_errors;
+    bool out_err_said;
+    uint8_t sink[SBC_XFER_BUFSZ];
+    size_t sink_len;
+    uint64_t sink_count;
+
 #ifdef CONFIG_USB_LIBUSB
     libusb_context *ctx;
     libusb_device_handle *handle;
@@ -113,7 +127,11 @@ typedef struct SbcDeviceCtx {
     int in_flight;
     int iface;
     uint8_t ep_in;
+    uint8_t ep_out;
     int xfer_len;
+    struct libusb_transfer *out_xfer;
+    uint8_t out_buf[SBC_XFER_BUFSZ];
+    bool out_in_flight;
     bool claimed;
     bool close_pending;
     bool poll_driven;
@@ -693,6 +711,9 @@ static void LIBUSB_CALL sbc_xfer_cb(struct libusb_transfer *t)
         g_sbc.status = SBC_DEV_ABSENT;
         sbc_set_detail("controller disconnected (bus %03u addr %03u)",
                        (unsigned)g_sbc.bus, (unsigned)g_sbc.addr);
+        if (g_sbc.serving) {
+            g_sbc.serve_lost = true;
+        }
         g_sbc.close_pending = true;
         sbc_schedule_supervise(0);
         return;
@@ -732,6 +753,9 @@ static void sbc_cancel_all(void)
             libusb_cancel_transfer(g_sbc.xfer[i]);
         }
     }
+    if (g_sbc.out_in_flight && g_sbc.out_xfer != NULL) {
+        libusb_cancel_transfer(g_sbc.out_xfer);
+    }
 }
 
 static void sbc_finish_close(void)
@@ -745,6 +769,11 @@ static void sbc_finish_close(void)
         }
         g_sbc.xfer_active[i] = false;
     }
+    if (g_sbc.out_xfer != NULL) {
+        libusb_free_transfer(g_sbc.out_xfer);
+        g_sbc.out_xfer = NULL;
+    }
+    g_sbc.out_in_flight = false;
     if (g_sbc.handle != NULL) {
         if (g_sbc.claimed) {
             libusb_release_interface(g_sbc.handle, g_sbc.iface);
@@ -767,7 +796,7 @@ static void sbc_drain_and_close(void)
     }
     g_sbc.close_pending = true;
     sbc_cancel_all();
-    while (g_sbc.in_flight > 0 && guard++ < 200) {
+    while ((g_sbc.in_flight > 0 || g_sbc.out_in_flight) && guard++ < 200) {
         struct timeval tv = { 0, 5000 };
         libusb_handle_events_timeout(g_sbc.ctx, &tv);
     }
@@ -781,10 +810,28 @@ static void sbc_pick_endpoint(libusb_device *dev)
 
     g_sbc.iface = SBC_DEFAULT_INTERFACE;
     g_sbc.ep_in = SBC_DEFAULT_EP_IN;
+    g_sbc.ep_out = SBC_DEFAULT_EP_OUT;
     g_sbc.xfer_len = SBC_RAW_REPORT_MAX;
 
     if (libusb_get_active_config_descriptor(dev, &cfg) != 0 || cfg == NULL) {
         return;
+    }
+    for (i = 0; i < cfg->bNumInterfaces; i++) {
+        const struct libusb_interface *itf = &cfg->interface[i];
+        for (j = 0; j < itf->num_altsetting; j++) {
+            const struct libusb_interface_descriptor *id = &itf->altsetting[j];
+            for (k = 0; k < id->bNumEndpoints; k++) {
+                const struct libusb_endpoint_descriptor *ep =
+                    &id->endpoint[k];
+                if ((ep->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) ==
+                        LIBUSB_ENDPOINT_OUT &&
+                    (ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) ==
+                        LIBUSB_TRANSFER_TYPE_INTERRUPT &&
+                    g_sbc.ep_out == SBC_DEFAULT_EP_OUT) {
+                    g_sbc.ep_out = ep->bEndpointAddress;
+                }
+            }
+        }
     }
     for (i = 0; i < cfg->bNumInterfaces; i++) {
         const struct libusb_interface *itf = &cfg->interface[i];
@@ -845,6 +892,69 @@ static bool sbc_submit_all(void)
         g_sbc.in_flight++;
     }
     return g_sbc.in_flight > 0;
+}
+
+static void LIBUSB_CALL sbc_out_cb(struct libusb_transfer *t)
+{
+    g_sbc.out_in_flight = false;
+    if (t->status == LIBUSB_TRANSFER_COMPLETED) {
+        g_sbc.out_sent++;
+        return;
+    }
+    if (t->status == LIBUSB_TRANSFER_CANCELLED) {
+        return;
+    }
+    g_sbc.out_errors++;
+    if (!g_sbc.out_err_said) {
+        g_sbc.out_err_said = true;
+        fprintf(stderr, SBC_LOG_PREFIX "a light report to EP 0x%02x failed "
+                "(transfer status %d); further failures are only counted\n",
+                (unsigned)g_sbc.ep_out, (int)t->status);
+    }
+}
+
+static bool sbc_out_submit(const uint8_t *report, size_t len)
+{
+    int rc;
+
+    if (g_sbc.handle == NULL || g_sbc.close_pending || g_sbc.out_in_flight ||
+        len == 0 || len > sizeof(g_sbc.out_buf)) {
+        return false;
+    }
+    if (g_sbc.out_xfer == NULL) {
+        g_sbc.out_xfer = libusb_alloc_transfer(0);
+        if (g_sbc.out_xfer == NULL) {
+            return false;
+        }
+    }
+    memcpy(g_sbc.out_buf, report, len);
+    libusb_fill_interrupt_transfer(g_sbc.out_xfer, g_sbc.handle, g_sbc.ep_out,
+                                   g_sbc.out_buf, (int)len, sbc_out_cb, NULL,
+                                   SBC_OUT_TIMEOUT_MS);
+    g_sbc.out_xfer->flags = 0;
+    rc = libusb_submit_transfer(g_sbc.out_xfer);
+    if (rc != 0) {
+        g_sbc.out_errors++;
+        if (!g_sbc.out_err_said) {
+            g_sbc.out_err_said = true;
+            fprintf(stderr, SBC_LOG_PREFIX "a light report could not be "
+                    "submitted: %s; further failures are only counted\n",
+                    sbc_err_name(rc));
+        }
+        return false;
+    }
+    g_sbc.out_in_flight = true;
+    return true;
+}
+
+static void sbc_out_wait(int ms)
+{
+    int guard = 0;
+
+    while (g_sbc.out_in_flight && g_sbc.ctx != NULL && guard++ < ms / 5) {
+        struct timeval tv = { 0, 5000 };
+        libusb_handle_events_timeout(g_sbc.ctx, &tv);
+    }
 }
 
 static void sbc_try_open(void)
@@ -913,10 +1023,15 @@ static void sbc_try_open(void)
 
         g_sbc.status = SBC_DEV_READY;
         sbc_set_detail("open on bus %03u addr %03u, interface %d, EP 0x%02x, "
-                       "%d transfers in flight",
+                       "%d transfers in flight; lights on EP 0x%02x",
                        (unsigned)g_sbc.bus, (unsigned)g_sbc.addr, g_sbc.iface,
-                       (unsigned)g_sbc.ep_in, g_sbc.in_flight);
+                       (unsigned)g_sbc.ep_in, g_sbc.in_flight,
+                       (unsigned)g_sbc.ep_out);
         fprintf(stderr, SBC_LOG_PREFIX "%s\n", g_sbc.detail);
+        g_sbc.out_err_said = false;
+        if (g_sbc.out_have) {
+            sbc_out_submit(g_sbc.out_last, g_sbc.out_last_len);
+        }
         break;
     }
 
@@ -971,7 +1086,7 @@ static void sbc_supervise(void *opaque)
     libusb_handle_events_timeout(g_sbc.ctx, &tv);
 
     if (g_sbc.close_pending) {
-        if (g_sbc.in_flight > 0) {
+        if (g_sbc.in_flight > 0 || g_sbc.out_in_flight) {
             sbc_cancel_all();
             sbc_schedule_supervise(SBC_DRAIN_MS);
             return;
@@ -985,7 +1100,9 @@ static void sbc_supervise(void *opaque)
     }
 
     now = sbc_now_us();
-    if (g_sbc.handle == NULL) {
+    if (g_sbc.handle == NULL && g_sbc.serve_lost) {
+        qatomic_set(&g_sbc.rescan_flag, 0);
+    } else if (g_sbc.handle == NULL) {
         bool hot = qatomic_xchg(&g_sbc.rescan_flag, 0) != 0;
         if (hot || now - g_sbc.last_scan_us >= SBC_RESCAN_MS * 1000ULL) {
             g_sbc.last_scan_us = now;
@@ -1235,6 +1352,9 @@ void sbc_device_shutdown(void)
     g_sbc.source = SBC_SRC_DEVICE;
     g_sbc.status = SBC_DEV_ABSENT;
     g_sbc.module_ready = false;
+    g_sbc.serving = false;
+    g_sbc.serve_started = false;
+    g_sbc.serve_lost = false;
 }
 
 void sbc_device_get_state(SbcDeviceState *out)
@@ -1367,5 +1487,155 @@ SbcDeviceStatus sbc_device_probe(char *detail, size_t detail_len)
 
 bool sbc_device_host_reader_armed(void)
 {
-    return sbc_host_reader_armed();
+    return sbc_host_reader_armed() || g_sbc.serving;
+}
+
+SbcDeviceStatus sbc_device_serve_begin(char *detail, size_t detail_len)
+{
+    if (detail && detail_len) {
+        detail[0] = '\0';
+    }
+    sbc_module_ready();
+    if (getenv("XEMU_NO_SBC_HOST_READER") != NULL) {
+        if (detail && detail_len) {
+            snprintf(detail, detail_len, "XEMU_NO_SBC_HOST_READER is set, "
+                     "which switches the reader of the controller off for "
+                     "this run: unset it");
+        }
+        return SBC_DEV_ERROR;
+    }
+    g_sbc.serving = true;
+    g_sbc.serve_started = false;
+    g_sbc.serve_lost = false;
+    if (g_sbc.source != SBC_SRC_DEVICE) {
+        fprintf(stderr, SBC_LOG_PREFIX "serving a Sim Configurator port from "
+                "the %s source (no controller is opened)\n",
+                sbc_source_name());
+        return SBC_DEV_READY;
+    }
+#ifdef CONFIG_USB_LIBUSB
+    if (g_sbc.ctx == NULL) {
+        if (!sbc_transport_init()) {
+            if (detail && detail_len) {
+                snprintf(detail, detail_len, "%s", g_sbc.detail);
+            }
+            g_sbc.serving = false;
+            return SBC_DEV_ERROR;
+        }
+        g_sbc.serve_started = true;
+    } else if (g_sbc.handle == NULL) {
+        g_sbc.last_scan_us = sbc_now_us();
+        sbc_try_open();
+    }
+    if (g_sbc.handle != NULL && g_sbc.status == SBC_DEV_READY) {
+        fprintf(stderr, SBC_LOG_PREFIX "serving a Sim Configurator port: %s\n",
+                g_sbc.detail);
+        return SBC_DEV_READY;
+    }
+    SbcDeviceStatus st = g_sbc.status == SBC_DEV_READY ? SBC_DEV_ERROR
+                                                       : g_sbc.status;
+    if (detail && detail_len) {
+        snprintf(detail, detail_len, "%s", g_sbc.detail);
+    }
+    if (g_sbc.serve_started) {
+        sbc_transport_shutdown();
+    }
+    g_sbc.serving = false;
+    g_sbc.serve_started = false;
+    return st;
+#else
+    if (detail && detail_len) {
+        snprintf(detail, detail_len, "this build has no libusb, so it "
+                 "cannot read the controller");
+    }
+    g_sbc.serving = false;
+    return SBC_DEV_ERROR;
+#endif
+}
+
+void sbc_device_serve_end(const uint8_t *off, size_t len)
+{
+    if (!g_sbc.serving) {
+        return;
+    }
+    if (off != NULL && len > 0 && len <= sizeof(g_sbc.sink)) {
+        if (g_sbc.source != SBC_SRC_DEVICE) {
+            memcpy(g_sbc.sink, off, len);
+            g_sbc.sink_len = len;
+            g_sbc.sink_count++;
+        }
+#ifdef CONFIG_USB_LIBUSB
+        else if (g_sbc.handle != NULL) {
+            sbc_out_wait(100);
+            if (sbc_out_submit(off, len)) {
+                sbc_out_wait(100);
+            }
+        }
+#endif
+    }
+    g_sbc.out_have = false;
+#ifdef CONFIG_USB_LIBUSB
+    if (g_sbc.serve_started && !sbc_host_reader_armed()) {
+        sbc_transport_shutdown();
+    }
+#endif
+    g_sbc.serving = false;
+    g_sbc.serve_started = false;
+    g_sbc.serve_lost = false;
+    fprintf(stderr, SBC_LOG_PREFIX "the Sim Configurator port is no longer "
+            "served%s\n", sbc_host_reader_armed() ?
+            " (XEMU_SBC_HOST_READER keeps the reader for the panel)" : "");
+}
+
+bool sbc_device_serving(void)
+{
+    return g_sbc.serving;
+}
+
+bool sbc_device_send_output(const uint8_t *report, size_t len)
+{
+    if (report == NULL || len == 0 || len > sizeof(g_sbc.out_last)) {
+        return false;
+    }
+    memcpy(g_sbc.out_last, report, len);
+    g_sbc.out_last_len = len;
+    g_sbc.out_have = true;
+    if (g_sbc.source != SBC_SRC_DEVICE) {
+        memcpy(g_sbc.sink, report, len);
+        g_sbc.sink_len = len;
+        g_sbc.sink_count++;
+        g_sbc.out_sent++;
+        return true;
+    }
+#ifdef CONFIG_USB_LIBUSB
+    return sbc_out_submit(report, len);
+#else
+    return false;
+#endif
+}
+
+void sbc_device_forget_output(void)
+{
+    g_sbc.out_have = false;
+}
+
+uint64_t sbc_device_sink_last(uint8_t *out, size_t *len)
+{
+    if (out != NULL && g_sbc.sink_len > 0) {
+        memcpy(out, g_sbc.sink, g_sbc.sink_len);
+    }
+    if (len != NULL) {
+        *len = g_sbc.sink_len;
+    }
+    return g_sbc.sink_count;
+}
+
+uint64_t sbc_device_output_sent(void)
+{
+    return g_sbc.out_sent;
+}
+
+uint64_t sbc_device_output_errors(void)
+{
+    return g_sbc.out_errors;
 }

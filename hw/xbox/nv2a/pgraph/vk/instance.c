@@ -21,6 +21,7 @@
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 #include "vr.h"
+#include "gpu_choice.h"
 #include "xemu-version.h"
 
 #define VkExtensionPropertiesArray GArray
@@ -363,6 +364,168 @@ static bool is_device_compatible(VkPhysicalDevice device)
            check_device_support_required_extensions(device);
 }
 
+static void describe_device(VkPhysicalDevice device, GpuSelectDevice *out)
+{
+    VkPhysicalDeviceProperties props;
+    VkPhysicalDeviceMemoryProperties mem;
+
+    memset(out, 0, sizeof(*out));
+    vkGetPhysicalDeviceProperties(device, &props);
+    g_strlcpy(out->name, props.deviceName, sizeof(out->name));
+    out->vendor_id = props.vendorID;
+    out->device_id = props.deviceID;
+    switch (props.deviceType) {
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        out->type = GPU_SELECT_TYPE_INTEGRATED;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        out->type = GPU_SELECT_TYPE_DISCRETE;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        out->type = GPU_SELECT_TYPE_VIRTUAL;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+        out->type = GPU_SELECT_TYPE_CPU;
+        break;
+    default:
+        out->type = GPU_SELECT_TYPE_OTHER;
+        break;
+    }
+
+    vkGetPhysicalDeviceMemoryProperties(device, &mem);
+    for (uint32_t i = 0; i < mem.memoryHeapCount; i++) {
+        if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            out->memory_bytes += mem.memoryHeaps[i].size;
+        }
+    }
+
+    g_autoptr(VkExtensionPropertiesArray) extensions =
+        get_available_device_extensions(device);
+    bool has_driver = is_extension_available(
+        extensions, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+    bool has_pci =
+        is_extension_available(extensions, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME);
+
+    out->driver = !has_driver && props.vendorID == 0x10de ?
+                      GPU_SELECT_DRIVER_NVIDIA :
+                      GPU_SELECT_DRIVER_OTHER;
+    if (props.apiVersion >= VK_API_VERSION_1_1) {
+        VkPhysicalDeviceIDProperties id = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+        };
+        VkPhysicalDeviceDriverProperties driver = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+        };
+        VkPhysicalDevicePCIBusInfoPropertiesEXT pci = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT,
+        };
+        VkPhysicalDeviceProperties2 props2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &id,
+        };
+        if (has_driver) {
+            driver.pNext = props2.pNext;
+            props2.pNext = &driver;
+        }
+        if (has_pci) {
+            pci.pNext = props2.pNext;
+            props2.pNext = &pci;
+        }
+        vkGetPhysicalDeviceProperties2(device, &props2);
+
+        memcpy(out->uuid, id.deviceUUID, GPU_SELECT_UUID_SIZE);
+        out->has_uuid = !gpu_select_uuid_is_zero(out->uuid);
+        if (has_driver) {
+            if (driver.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) {
+                out->driver = GPU_SELECT_DRIVER_NVIDIA;
+            }
+            g_autofree char *text =
+                g_strdup_printf("%s %s", driver.driverName, driver.driverInfo);
+            g_strlcpy(out->driver_text, g_strstrip(text),
+                      sizeof(out->driver_text));
+        }
+        if (has_pci) {
+            out->has_pci = true;
+            out->pci_domain = pci.pciDomain;
+            out->pci_bus = pci.pciBus;
+            out->pci_device = pci.pciDevice;
+            out->pci_function = pci.pciFunction;
+        }
+    }
+
+    out->usable = is_device_compatible(device);
+    if (!out->usable) {
+        const char *missing = NULL;
+        for (int i = 0; i < ARRAY_SIZE(required_device_extensions); i++) {
+            if (!is_extension_available(extensions,
+                                        required_device_extensions[i])) {
+                missing = required_device_extensions[i];
+                break;
+            }
+        }
+        if (props.apiVersion < VK_API_VERSION_1_1) {
+            g_strlcpy(out->why_not, "Vulkan 1.1 is required",
+                      sizeof(out->why_not));
+        } else if (missing) {
+            g_autofree char *text =
+                g_strdup_printf("the extension %s is missing", missing);
+            g_strlcpy(out->why_not, text, sizeof(out->why_not));
+        } else {
+            g_strlcpy(out->why_not,
+                      "no queue family with graphics and compute",
+                      sizeof(out->why_not));
+        }
+    }
+}
+
+int pgraph_vk_gpu_probe(GpuSelectDevice *out, int max)
+{
+    if (volkInitialize() != VK_SUCCESS) {
+        return 0;
+    }
+    uint32_t instance_version = VK_API_VERSION_1_0;
+    if (vkEnumerateInstanceVersion) {
+        vkEnumerateInstanceVersion(&instance_version);
+    }
+    if (instance_version < VK_API_VERSION_1_1) {
+        return 0;
+    }
+
+    VkApplicationInfo app_info = {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pApplicationName = "xemu",
+        .apiVersion = MIN(instance_version, VK_API_VERSION_1_3),
+    };
+    VkInstanceCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo = &app_info,
+    };
+    VkInstance instance = VK_NULL_HANDLE;
+    if (vkCreateInstance(&create_info, NULL, &instance) != VK_SUCCESS) {
+        return 0;
+    }
+    volkLoadInstance(instance);
+
+    int count = 0;
+    uint32_t num_devices = 0;
+    if (vkEnumeratePhysicalDevices(instance, &num_devices, NULL) ==
+            VK_SUCCESS &&
+        num_devices > 0) {
+        g_autofree VkPhysicalDevice *devices =
+            g_malloc0_n(num_devices, sizeof(VkPhysicalDevice));
+        VkResult result =
+            vkEnumeratePhysicalDevices(instance, &num_devices, devices);
+        if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
+            for (uint32_t i = 0; i < num_devices && count < max; i++) {
+                describe_device(devices[i], &out[count++]);
+            }
+        }
+    }
+    vkDestroyInstance(instance, NULL);
+    return count;
+}
+
 static bool select_physical_device(PGRAPHState *pg, Error **errp)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -380,6 +543,9 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
         r->vk_api_version = MIN(r->vk_api_version, r->device_props.apiVersion);
         fprintf(stderr, "Physical device selected by OpenXR runtime: %s\n",
                 r->device_props.deviceName);
+        GpuSelectDevice xr_desc;
+        describe_device(xr_device, &xr_desc);
+        xemu_gpu_note_vulkan_xr(&xr_desc);
         return true;
     }
 
@@ -397,7 +563,6 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
     vkEnumeratePhysicalDevices(r->instance, &num_physical_devices, devices);
 
     const char *preferred_device = g_config.display.vulkan.preferred_physical_device;
-    int preferred_device_index = -1;
 
     fprintf(stderr, "Available physical devices:\n");
     for (int i = 0; i < num_physical_devices; i++) {
@@ -405,25 +570,27 @@ static bool select_physical_device(PGRAPHState *pg, Error **errp)
         bool is_preferred =
             preferred_device &&
             !strcmp(r->device_props.deviceName, preferred_device);
-        if (is_preferred) {
-            preferred_device_index = i;
-        }
         fprintf(stderr, "- %s%s\n", r->device_props.deviceName,
                 is_preferred ? " *" : "");
     }
 
     r->physical_device = VK_NULL_HANDLE;
 
-    if (preferred_device_index >= 0 &&
-        is_device_compatible(devices[preferred_device_index])) {
-        r->physical_device = devices[preferred_device_index];
-    } else {
-        for (int i = 0; i < num_physical_devices; i++) {
-            if (is_device_compatible(devices[i])) {
-                r->physical_device = devices[i];
-                break;
-            }
-        }
+    int n_desc = MIN(num_physical_devices, GPU_SELECT_MAX_DEVICES);
+    g_autofree GpuSelectDevice *desc = g_new0(GpuSelectDevice, n_desc);
+    g_autofree int *desc_device = g_new0(int, n_desc);
+    for (int i = 0; i < n_desc; i++) {
+        describe_device(devices[i], &desc[i]);
+    }
+    n_desc = gpu_select_dedup(desc, n_desc, desc_device);
+    uint8_t gl_uuid[GPU_SELECT_UUID_SIZE];
+    bool gl_known = xemu_gpu_gl_uuid(gl_uuid);
+    GpuSelectChoice choice = xemu_gpu_effective_choice(NULL);
+    GpuSelectPick pick =
+        gpu_select_pick(desc, n_desc, &choice, gl_known ? gl_uuid : NULL);
+    if (pick.index >= 0) {
+        r->physical_device = devices[desc_device[pick.index]];
+        xemu_gpu_note_vulkan_pick(desc, n_desc, &pick);
     }
     if (r->physical_device == VK_NULL_HANDLE) {
         error_setg(errp, "Failed to find a suitable GPU");

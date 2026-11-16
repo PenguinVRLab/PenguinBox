@@ -7,5 +7,5 @@ device: racing_pedals
 inputs:
   accel:
     min: -32768
-    rest: -32700
+    rest: -32768
     max: 32100

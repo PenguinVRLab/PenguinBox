@@ -27,6 +27,7 @@
 #include "hw/xbox/nv2a/pgraph/vr_padxr.h"
 #include "hw/xbox/nv2a/pgraph/vk/vr_ui_panel.h"
 #include "xid-ui-gate.h"
+#include "ui/xemu-sim-port.h"
 
 #ifdef DEBUG_XID
 #define DPRINTF printf
@@ -273,6 +274,8 @@ static void usb_xid_steel_battalion_handle_control(USBDevice *dev, USBPacket *p,
             if (length == sizeof(s->out_state)) {
                 memcpy(&s->out_state, data, sizeof(s->out_state));
                 p->actual_length = length;
+                xemu_sim_port_sbc_output(s->device_index, &s->out_state,
+                                         sizeof(s->out_state));
             } else {
                 p->status = USB_RET_STALL;
             }
@@ -354,6 +357,8 @@ static void usb_xid_steel_battalion_handle_data(USBDevice *dev, USBPacket *p)
         if (p->ep->nr == STEEL_BATTALION_OUT_ENDPOINT_ID) {
             usb_packet_copy(p, &s->out_state,
                             MIN(p->iov.size, sizeof(s->out_state)));
+            xemu_sim_port_sbc_output(s->device_index, &s->out_state,
+                                     sizeof(s->out_state));
         } else {
             p->status = USB_RET_STALL;
         }

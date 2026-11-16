@@ -530,6 +530,9 @@ display:
     debug_shaders: bool
     assert_on_validation_msg: bool
     preferred_physical_device: string
+  gpu:
+    uuid: string
+    name: string
   quality:
     surface_scale:
       type: integer

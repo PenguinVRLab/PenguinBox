@@ -1,0 +1,75 @@
+# The real Steel Battalion controller (0a7b:d000) as the app reads it live (work/0013, devices/sbc_live.py): the same
+# object the emulated target is (target_steel_battalion.yaml), so this file carries the target's ids, kinds, ranges,
+# latching flags, drawing and anchors unchanged, and nothing else:
+#   * every control devices/sbc.py's decoder yields (frame_values): the 39 report buttons, the 8 axes, the gear lever and
+#     the tuner dial (49). The target's four synthetic buttons (gear_up/down, tuner_left/right) are not on the wire, so
+#     they are not here.
+#   * `code:` is the code devices/sbc_live.py reports the control on (axes EV_ABS 0..7, buttons EV_KEY = the report bit
+#     0..38): that reader's own numbering, NOT kernel codes (the controller has no kernel input node). With it, Calibrate's
+#     live reader reads the axes. The gear lever and tuner dial are detents (EV_ABS 8 and 9 in the reader, no `code:`
+#     here: the schema gives detents none).
+#   * `anchor:` only where the target has one (blocks named by a text source, O-22); the other controls stay unanchored
+#     and the chart lists them in its label columns, as the target's own chart does. No position is guessed.
+#   * no `outputs:`: the panel LEDs' byte/bit channels are not transcribed (the target's own outputs say so), so Test-fire
+#     offers nothing for it yet.
+# `match` makes S-56 (profile/defaults.py ACTUAL) offer the one-to-one default mapping on a Steel Battalion port.
+# NOT measured on a unit: the owner's live run in work/0013 is what checks this file against the real controller.
+schema: sim-profile/1
+kind: device
+id: steel_battalion_controller
+name: "Steel Battalion controller"
+source: hid_usb
+match: { vid: 0x0a7b, pid: 0xd000 }
+art: devices/art/steel_battalion.svg
+inputs:
+  - { id: aiming_x, kind: axis, code: 0, min: 0, rest: 32768, max: 65535, anchor: [765, 95], label: "Aiming lever (right stick) left / right" }
+  - { id: aiming_y, kind: axis, code: 1, min: 0, rest: 32768, max: 65535, anchor: [765, 135], label: "Aiming lever (right stick) forward / back" }
+  - { id: rotation_lever, kind: axis, code: 2, min: -32768, rest: 0, max: 32767, anchor: [130, 200], label: "Rotation lever (left stick)" }
+  - { id: sight_change_x, kind: axis, code: 3, min: -32768, rest: 0, max: 32767, anchor: [118, 64], label: "Sight change (left stick's hat) left / right" }
+  - { id: sight_change_y, kind: axis, code: 4, min: -32768, rest: 0, max: 32767, anchor: [130, 52], label: "Sight change (left stick's hat) up / down" }
+  - { id: left_pedal, kind: axis, code: 5, min: 0, rest: 0, max: 65535, anchor: [330, 460], label: "Left pedal" }
+  - { id: middle_pedal, kind: axis, code: 6, min: 0, rest: 0, max: 65535, anchor: [450, 460], label: "Middle pedal" }
+  - { id: right_pedal, kind: axis, code: 7, min: 0, rest: 0, max: 65535, anchor: [570, 460], label: "Right pedal" }
+  # gear_lever positions are the wire values: R = 254, N = 255, gears 1-5 (devices/sbc.py GEAR_NAMES; S-79). The real
+  # lever sends 0 between gears: 0 is not a position, and it passes through to the game unchanged (the owner, "option c").
+  - { id: gear_lever, kind: detent, positions: [254, 255, 1, 2, 3, 4, 5], label: "Gear lever (R, N, 1-5)" }
+  - { id: tuner_dial, kind: detent, positions: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], label: "Tuner dial (16 positions)" }
+  - { id: main_weapon, kind: button, code: 0, label: "Main weapon" }
+  - { id: sub_weapon, kind: button, code: 1, label: "Sub weapon" }
+  - { id: lock_on, kind: button, code: 2, label: "Lock-on" }
+  - { id: eject, kind: button, code: 3, label: "Eject" }
+  - { id: cockpit_hatch, kind: button, code: 4, label: "Cockpit hatch" }
+  - { id: ignition, kind: button, code: 5, label: "Ignition" }
+  - { id: start, kind: button, code: 6, label: "Start" }
+  - { id: open_close, kind: button, code: 7, label: "Open / close" }
+  - { id: map_zoom_in_out, kind: button, code: 8, label: "Map zoom in / out" }
+  - { id: mode_select, kind: button, code: 9, label: "Mode select" }
+  - { id: sub_monitor_mode_select, kind: button, code: 10, label: "Sub-monitor mode select" }
+  - { id: zoom_in, kind: button, code: 11, anchor: [315, 140], label: "Zoom in" }
+  - { id: zoom_out, kind: button, code: 12, anchor: [369, 140], label: "Zoom out" }
+  - { id: fss, kind: button, code: 13, anchor: [423, 140], label: "F.S.S." }
+  - { id: manipulator, kind: button, code: 14, anchor: [477, 140], label: "Manipulator" }
+  - { id: line_color_change, kind: button, code: 15, anchor: [531, 140], label: "Line color change" }
+  - { id: washing, kind: button, code: 16, anchor: [585, 140], label: "Washing" }
+  - { id: extinguisher, kind: button, code: 17, anchor: [315, 185], label: "Extinguisher" }
+  - { id: chaff, kind: button, code: 18, anchor: [369, 185], label: "Chaff" }
+  - { id: tank_detach, kind: button, code: 19, anchor: [423, 185], label: "Tank detach" }
+  - { id: override, kind: button, code: 20, anchor: [477, 185], label: "Override" }
+  - { id: night_scope, kind: button, code: 21, anchor: [531, 185], label: "Night scope" }
+  - { id: func1, kind: button, code: 22, anchor: [585, 185], label: "F1" }
+  - { id: func2, kind: button, code: 23, anchor: [315, 230], label: "F2" }
+  - { id: func3, kind: button, code: 24, anchor: [369, 230], label: "F3" }
+  - { id: main_weapon_control, kind: button, code: 25, anchor: [423, 230], label: "Main weapon control" }
+  - { id: sub_weapon_control, kind: button, code: 26, anchor: [477, 230], label: "Sub weapon control" }
+  - { id: magazine_change, kind: button, code: 27, anchor: [531, 230], label: "Magazine change" }
+  - { id: com1, kind: button, code: 28, label: "COM1" }
+  - { id: com2, kind: button, code: 29, label: "COM2" }
+  - { id: com3, kind: button, code: 30, label: "COM3" }
+  - { id: com4, kind: button, code: 31, label: "COM4" }
+  - { id: com5, kind: button, code: 32, label: "COM5" }
+  - { id: sight_change, kind: button, code: 33, anchor: [130, 64], label: "Sight change (press the left stick's hat)" }
+  - { id: filt_control_system, kind: button, code: 34, latching: true, label: "Filt control system (toggle)" }
+  - { id: oxygen_supply_system, kind: button, code: 35, latching: true, label: "Oxygen supply system (toggle)" }
+  - { id: fuel_flow_rate, kind: button, code: 36, latching: true, label: "Fuel flow rate (toggle)" }
+  - { id: buffer_material, kind: button, code: 37, latching: true, label: "Buffer material (toggle)" }
+  - { id: vt_location_measurement, kind: button, code: 38, latching: true, label: "VT location measurement (toggle)" }
