@@ -235,6 +235,11 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
                                    int peripheral_type,
                                    const char *peripheral_parameter);
 
+void xemu_input_strict_begin(void);
+void xemu_input_strict_end(void);
+bool xemu_input_strict_active(void);
+bool xemu_input_strict_refuse_xmu(int index);
+
 void xemu_input_set_test_mode(int enabled);
 int xemu_input_get_test_mode(void);
 void xemu_input_reset_input_mapping(ControllerState *state);

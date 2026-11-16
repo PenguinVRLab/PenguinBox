@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simsbc: the real Steel Battalion controller one to one (written for this test, not the app's).
+schema: sim-profile/1
+kind: bindings
+id: sbc_all
+device: steel_battalion_controller
+target: steel_battalion
+bind:
+  - { source: aiming_x, target: aiming_x }
+  - { source: aiming_y, target: aiming_y }
+  - { source: rotation_lever, target: rotation_lever }
+  - { source: sight_change_x, target: sight_change_x }
+  - { source: sight_change_y, target: sight_change_y }
+  - { source: left_pedal, target: left_pedal }
+  - { source: middle_pedal, target: middle_pedal }
+  - { source: right_pedal, target: right_pedal }
+  - { source: gear_lever, target: gear_lever }
+  - { source: tuner_dial, target: tuner_dial }
+  - { source: main_weapon, target: main_weapon }
+  - { source: sub_weapon, target: sub_weapon }
+  - { source: lock_on, target: lock_on }
+  - { source: eject, target: eject }
+  - { source: cockpit_hatch, target: cockpit_hatch }
+  - { source: ignition, target: ignition }
+  - { source: start, target: start }
+  - { source: open_close, target: open_close }
+  - { source: map_zoom_in_out, target: map_zoom_in_out }
+  - { source: mode_select, target: mode_select }
+  - { source: sub_monitor_mode_select, target: sub_monitor_mode_select }
+  - { source: zoom_in, target: zoom_in }
+  - { source: zoom_out, target: zoom_out }
+  - { source: fss, target: fss }
+  - { source: manipulator, target: manipulator }
+  - { source: line_color_change, target: line_color_change }
+  - { source: washing, target: washing }
+  - { source: extinguisher, target: extinguisher }
+  - { source: chaff, target: chaff }
+  - { source: tank_detach, target: tank_detach }
+  - { source: override, target: override }
+  - { source: night_scope, target: night_scope }
+  - { source: func1, target: func1 }
+  - { source: func2, target: func2 }
+  - { source: func3, target: func3 }
+  - { source: main_weapon_control, target: main_weapon_control }
+  - { source: sub_weapon_control, target: sub_weapon_control }
+  - { source: magazine_change, target: magazine_change }
+  - { source: com1, target: com1 }
+  - { source: com2, target: com2 }
+  - { source: com3, target: com3 }
+  - { source: com4, target: com4 }
+  - { source: com5, target: com5 }
+  - { source: sight_change, target: sight_change }
+  - { source: filt_control_system, target: filt_control_system }
+  - { source: oxygen_supply_system, target: oxygen_supply_system }
+  - { source: fuel_flow_rate, target: fuel_flow_rate }
+  - { source: buffer_material, target: buffer_material }
+  - { source: vt_location_measurement, target: vt_location_measurement }

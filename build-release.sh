@@ -255,11 +255,14 @@ Exec=qemu-system-i386
 Icon=penguinbox
 Terminal=false
 Categories=Game;Emulator;
+PrefersNonDefaultGPU=true
 DESKTOP
   cp "$APPDIR/usr/share/applications/penguinbox.desktop" "$APPDIR/penguinbox.desktop"
 
   install -Dm755 scripts/penguinbox-sbc-rules.sh "$APPDIR/usr/bin/penguinbox-sbc-rules"
   install -Dm644 scripts/70-penguinvrlabs-sim-devices.rules "$APPDIR/usr/share/penguinbox/70-penguinvrlabs-sim-devices.rules"
+  # The Sim Configurator's shipped documents (targets, devices), read on a Sim Configurator boot from <exe>/../share/penguinbox/sim-profiles
+  install -Dm644 -t "$APPDIR/usr/share/penguinbox/sim-profiles" data/sim-profiles/*.yaml data/sim-profiles/SOURCE.md
   cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"

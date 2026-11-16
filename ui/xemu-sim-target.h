@@ -48,6 +48,10 @@ extern "C" {
 void sim_target_write_sbc(const SimMerge *m, uint64_t *buttons, uint64_t *previous_buttons, int16_t *axis,
                           uint8_t *gear_lever, uint8_t *tuner_dial, uint8_t *toggle_switches);
 
+void sim_target_write_sbc_levels(const SimMerge *m, uint64_t *buttons, uint64_t *previous_buttons, int16_t *axis,
+                                 uint8_t *gear_lever, uint8_t *tuner_dial, uint8_t *toggle_switches,
+                                 uint8_t toggle_level_mask);
+
 void sim_target_write_duke(const SimMerge *m, uint16_t *buttons, int16_t *axis);
 
 #ifdef __cplusplus

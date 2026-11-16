@@ -11,7 +11,8 @@
 # back) is the top; the trigger is BTN_TRIGGER (288). The head buttons came as 290, 291, 289 in the order the
 # owner was asked (left, right, below the hat), so left = BTN_THUMB2 (290), right = BTN_TOP (291), below =
 # BTN_THUMB (289): INFERRED from that order (the owner said the run went partly wrong; the hat was pressed first),
-# not yet confirmed by a counted press. Joystick profiles carry no codes yet (work/0010); these comments are them.
+# not yet confirmed by a counted press. The codes and the throttle's range below are what Device Studio makes from
+# that recording (work/0042; tests/test_shipped_devices_from_recordings.py).
 # The owner's unit, read on the rig 2026-10-10 (tests/fixtures/udev/rig_2026-10-10_t16000m.txt): 044f:b10a,
 # 16 buttons, X/Y 14-bit, twist and throttle 8-bit, a hat, no serial. One ID for either hand, so both hand profiles
 # carry the same `match` and the Identify list offers both; the owner picks the hand.
@@ -26,21 +27,25 @@ name: "Thrustmaster T.16000M"
 source: sdl_joystick
 match: { vid: 0x044f, pid: 0xb10a }
 art: devices/art/t16000m.svg
-# Input ids name a control's position or function; the real button and axis codes are captured on
-# the owner's hardware with press-to-identify (work/0009, work/0010), and the descriptor ranges are
-# placeholders until then. Anchors are points in the art's viewBox.
+# Input ids name a control's position or function. Codes and axis ranges come from the owner's recording through
+# Device Studio (work/0042). stick_x, stick_y and twist were never moved in a recording, so WHICH control each
+# code is rests on the kernel's code names (unconfirmed: docs/hardware/device-coverage.md); their ranges are
+# the unit's own, from the recording's header through Device Studio's attach step (0..16383, 0..16383,
+# 0..255, each resting at its centre as the recording found them: 8178, 7780, 128). The throttle slider stays
+# where it is left: that its rest is the pulled-back end (255) is this file's choice, not a recording's
+# (the recording started with the slider at 0). Anchors are points in the art's viewBox.
 inputs:
   # Axes
-  - { id: stick_x, kind: axis, code: 0, min: -32768, rest: 0, max: 32767, anchor: [240, 250], label: "Stick left / right" }  # ABS_X
-  - { id: stick_y, kind: axis, code: 1, min: -32768, rest: 0, max: 32767, anchor: [240, 300], label: "Stick forward / back" }  # ABS_Y
-  - { id: twist, kind: axis, code: 5, min: -32768, rest: 0, max: 32767, anchor: [240, 372], label: "Twist (rudder)" }  # ABS_RZ
-  - { id: throttle, kind: axis, code: 6, min: -32768, rest: 32767, max: 32767, anchor: [240, 488], label: "Throttle slider, front of the base" }  # ABS_THROTTLE
+  - { id: stick_x, kind: axis, code: 0, min: 0, rest: 8192, max: 16383, anchor: [240, 250], label: "Stick left / right" }  # ABS_X
+  - { id: stick_y, kind: axis, code: 1, min: 0, rest: 8192, max: 16383, anchor: [240, 300], label: "Stick forward / back" }  # ABS_Y
+  - { id: twist, kind: axis, code: 5, min: 0, rest: 128, max: 255, anchor: [240, 372], label: "Twist (rudder)" }  # ABS_RZ
+  - { id: throttle, kind: axis, code: 6, min: 0, rest: 255, max: 255, anchor: [240, 488], label: "Throttle slider, front of the base" }  # ABS_THROTTLE
   # The grip
-  - { id: trigger, kind: button, anchor: [308, 222], label: "Trigger" }  # BTN_TRIGGER 288
-  - { id: hat, kind: hat, anchor: [240, 104], label: "Hat (8-way)" }
-  - { id: head_left, kind: button, anchor: [204, 126], label: "Head button, left of the hat" }  # BTN_THUMB2 290 (INFERRED)
-  - { id: head_right, kind: button, anchor: [276, 126], label: "Head button, right of the hat" }  # BTN_TOP 291 (INFERRED)
-  - { id: head_thumb, kind: button, anchor: [240, 156], label: "Head button, below the hat (thumb)" }  # BTN_THUMB 289 (INFERRED)
+  - { id: trigger, kind: button, code: 288, anchor: [308, 222], label: "Trigger" }  # BTN_TRIGGER 288
+  - { id: hat, kind: hat, code: 16, anchor: [240, 104], label: "Hat (8-way)" }  # ABS_HAT0X 16, Y 17 (INFERRED: not asked)
+  - { id: head_left, kind: button, code: 290, anchor: [204, 126], label: "Head button, left of the hat" }  # BTN_THUMB2 290 (INFERRED)
+  - { id: head_right, kind: button, code: 291, anchor: [276, 126], label: "Head button, right of the hat" }  # BTN_TOP 291 (INFERRED)
+  - { id: head_thumb, kind: button, code: 289, anchor: [240, 156], label: "Head button, below the hat (thumb)" }  # BTN_THUMB 289 (INFERRED)
   # The base: two groups of six
   - { id: base_left_1, kind: button, anchor: [88, 437], label: "Base, left group, top row, outer" }
   - { id: base_left_2, kind: button, anchor: [115, 437], label: "Base, left group, top row, middle" }

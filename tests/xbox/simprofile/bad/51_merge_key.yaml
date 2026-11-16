@@ -1,0 +1,10 @@
+schema: sim-profile/1
+kind: bindings
+id: pgr2_wheel
+device: wheel
+target: xbox_duke
+bind:
+  - { source: steering, target: left_stick_x }
+  - { source: paddle_up, target: a }
+  - { <<: { source: paddle_down }, target: b }
+  - { source: pov, target: dpad_up, direction: up }

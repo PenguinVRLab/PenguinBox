@@ -94,6 +94,25 @@
 #     (as above). Reading keys does not move p.
 #   values[i] and rounded[i] are p after step i, continuous and rounded (O-07, halves away from rest). Expected values
 #   were computed in exact rational arithmetic from this text, not from profile/merge.py.
+#
+# ---- S-80 and S-81 (2026-11-15): a LEVER (detent) on a button or a lever, a HAT on a button.
+# The owner ruled decision 4, "(a) Define it, with the value passing straight through" (a lever bound to a lever with
+#   the same positions), and decision 6, "(a) Adopt what PenguinBox built: left and up negative, a diagonal presses
+#   both". The exact rules below are the coordinator's PROPOSAL under those rulings (decisions.md S-80, S-81).
+# A position, and a lever's reading, is an integer or a text string, as PyYAML (YAML 1.1 core) types the plain scalar:
+#   1 is the integer 1; "1", n and r are text. Positions and readings compare by type AND value: the integer 1 never
+#   matches the text "1". A bool or a float position is refused (DETENT_POSITIONS), so no vector has one.
+# kind detent_button: one lever bound to one button with the binding's `position` (one of `positions`). pressed[i] is
+#   true exactly when readings[i] equals that position by type and value; any other reading, one that is not a position
+#   at all included (the gear lever's 0 between gears), is released.
+# kind detent_detent: a lever bound to a lever with the SAME positions (equal lists, same order, by type and value;
+#   the validator refuses any other pair, DETENT_POSITIONS_DIFFER). values[i] is readings[i], passed straight through
+#   UNCHANGED, type kept, also a reading that is not one of the positions: the gear lever's 0 between gears reaches the
+#   target as 0 (the owner, 2026-11-15, "option c": the game sees exactly what a real Xbox would).
+# kind hat_button: a hat is two axes, x on its `code` (ABS_HAT<n>X) and y on code + 1; readings[i] is [x, y]. Only the
+#   sign is read: left is x < 0, right x > 0, up y < 0, down y > 0, and 0 is neither. A hat -> button binding with
+#   `direction` is pressed while that direction is held, so a diagonal presses both of its bound directions; a
+#   direction with no binding presses nothing. pressed[i] is the binding's state for readings[i].
 format: 1
 tolerance: 1.0e-6
 
@@ -358,3 +377,31 @@ vectors:
   - { id: stay-put-shared-two-mice-document-order, rule: S-75, kind: stay_put, target: { min: 0, rest: 32768, max: 65535 }, rates: {}, integrates: [ { name: mouse, counts_per_travel: 2000, recentre: mid }, { name: ball, counts_per_travel: 500, source_invert: true } ],
       steps: [ { dt_ms: 0, counts: { mouse: 1000, ball: 100 }, held: [] }, { dt_ms: 16, counts: { mouse: -2000, ball: -50 }, held: [] }, { dt_ms: 16, counts: { mouse: 100, ball: 10 }, held: [mid] }, { dt_ms: 16, counts: { ball: -10 }, held: [] } ],
       expect: { values: [ 52428.0, 6553.5, 31457.3, 32768.0 ], rounded: [ 52428, 6553, 31457, 32768 ] } }
+  # ---- S-80: a lever (detent) on a button, and on a lever with the same positions (the coordinator's proposal)
+  - { id: detent-button-gear-first, rule: S-80, kind: detent_button, positions: [ 254, 255, 1, 2, 3, 4, 5 ], binding: { position: 1 }, readings: [ 255, 1, 0, 2, 1, 254, 1 ],
+      expect: { pressed: [ false, true, false, false, true, false, true ] } }
+  - { id: detent-button-gear-reverse, rule: S-80, kind: detent_button, positions: [ 254, 255, 1, 2, 3, 4, 5 ], binding: { position: 254 }, readings: [ 255, 254, 0, 254, 255, 1 ],
+      expect: { pressed: [ false, true, false, true, false, false ] } }
+  - { id: detent-button-text-positions-by-type, rule: S-80, kind: detent_button, positions: [ n, "1", "2", "3", "4", "5", "6", r ], binding: { position: "1" }, readings: [ n, "1", 1, "2", r, "1" ],
+      expect: { pressed: [ false, true, false, false, false, true ] } }
+  - { id: detent-button-zero-is-a-position-here, rule: S-80, kind: detent_button, positions: [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ], binding: { position: 0 }, readings: [ 0, 15, 1, 0 ],
+      expect: { pressed: [ true, false, false, true ] } }
+  - { id: detent-detent-gear-lever, rule: S-80, kind: detent_detent, positions: [ 254, 255, 1, 2, 3, 4, 5 ], readings: [ 255, 1, 2, 3, 4, 5, 4, 255, 254 ],
+      expect: { values: [ 255, 1, 2, 3, 4, 5, 4, 255, 254 ] } }
+  - { id: detent-detent-tuner-dial, rule: S-80, kind: detent_detent, positions: [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ], readings: [ 0, 15, 7, 8, 0 ],
+      expect: { values: [ 0, 15, 7, 8, 0 ] } }
+  - { id: detent-detent-text-positions-keep-their-type, rule: S-80, kind: detent_detent, positions: [ n, "1", "2", "3", "4", "5", "6", r ], readings: [ n, "1", "6", r ],
+      expect: { values: [ n, "1", "6", r ] } }
+  - { id: detent-detent-gear-between-gears-passes-through, rule: S-80, kind: detent_detent, positions: [ 254, 255, 1, 2, 3, 4, 5 ], readings: [ 1, 0, 2 ],
+      expect: { values: [ 1, 0, 2 ] } }
+  - { id: detent-detent-gear-down-through-neutral-to-reverse, rule: S-80, kind: detent_detent, positions: [ 254, 255, 1, 2, 3, 4, 5 ], readings: [ 2, 0, 1, 0, 255, 0, 254 ],
+      expect: { values: [ 2, 0, 1, 0, 255, 0, 254 ] } }
+  # ---- S-81: hat directions (PenguinBox's reading, adopted; left and up negative, only the sign read)
+  - { id: hat-button-up, rule: S-81, kind: hat_button, binding: { direction: up }, readings: [ [ 0, 0 ], [ -1, 0 ], [ 1, 0 ], [ 0, -1 ], [ 0, 1 ], [ -1, -1 ], [ 1, -1 ], [ -1, 1 ], [ 1, 1 ], [ -127, 0 ], [ 0, 32767 ], [ 5, -5 ] ],
+      expect: { pressed: [ false, false, false, true, false, true, true, false, false, false, false, true ] } }
+  - { id: hat-button-down, rule: S-81, kind: hat_button, binding: { direction: down }, readings: [ [ 0, 0 ], [ -1, 0 ], [ 1, 0 ], [ 0, -1 ], [ 0, 1 ], [ -1, -1 ], [ 1, -1 ], [ -1, 1 ], [ 1, 1 ], [ -127, 0 ], [ 0, 32767 ], [ 5, -5 ] ],
+      expect: { pressed: [ false, false, false, false, true, false, false, true, true, false, true, false ] } }
+  - { id: hat-button-left, rule: S-81, kind: hat_button, binding: { direction: left }, readings: [ [ 0, 0 ], [ -1, 0 ], [ 1, 0 ], [ 0, -1 ], [ 0, 1 ], [ -1, -1 ], [ 1, -1 ], [ -1, 1 ], [ 1, 1 ], [ -127, 0 ], [ 0, 32767 ], [ 5, -5 ] ],
+      expect: { pressed: [ false, true, false, false, false, true, false, true, false, true, false, false ] } }
+  - { id: hat-button-right, rule: S-81, kind: hat_button, binding: { direction: right }, readings: [ [ 0, 0 ], [ -1, 0 ], [ 1, 0 ], [ 0, -1 ], [ 0, 1 ], [ -1, -1 ], [ 1, -1 ], [ -1, 1 ], [ 1, 1 ], [ -127, 0 ], [ 0, 32767 ], [ 5, -5 ] ],
+      expect: { pressed: [ false, false, true, false, false, false, true, false, true, false, false, true ] } }

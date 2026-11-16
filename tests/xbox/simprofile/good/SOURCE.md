@@ -3,15 +3,21 @@
 SPDX-FileCopyrightText: 2026 Patrick Carey
 SPDX-License-Identifier: MIT
 
-Copied unchanged from the sim-configurator repo (MIT, the same author) at its `main` `80d47c2072fe25498f6806c3cdf389d4bd590329` (2026-11-15; 30 files),
-`tests/fixtures/good/*.yaml`. A reader that cannot load them is out of date (the app's `docs/profile-schema.md` §8).
-The app's bad cases are in `../bad/` (its work/0039); this test also keeps its own mutations (part D), which check the
-cascade of a refusal as well. Refresh from the app in one commit, with this table; never edit them here.
+Copied unchanged from the sim-configurator repo (MIT, the same author) at its `main`
+`ee9e736288b733250867c79c1603052d2efb8a8c` (2026-11-15; it carries the branch
+`dm4800/feat/contract-levers-hats-20261115`, first vendored here from its tip `8515ae4`). At that commit
+`tests/fixtures/merge/vectors.yaml` has sha256 `03e6a916445ee6f0ab517e36eb30ae5a42123d8eae24b50fb51f559cd4d1c02e` and
+`tests/fixtures/bad/MANIFEST.tsv` sha256 `84b97f09edc092e12c4a68df31cdaca667309207e7a7b62c83457afef57512ab`.
+`tests/fixtures/good/*.yaml`, 31 files. A reader that cannot load them is out of date (the app's
+`docs/profile-schema.md` §8). The app's bad cases are in `../bad/` (its work/0039); this test also keeps its own
+mutations (part D), which check the cascade of a refusal as well. Refresh from the app in one commit, with this table;
+never edit them here.
 
 | File | sha256 |
 |---|---|
 | `bindings_racing.yaml` | `d416621d8732b23f09f80c51fc153b9cd8f5af4d1608a9cdea4b4f07929ad444` |
 | `bindings_sbc_keys.yaml` | `724c3f07a5ecec9d5cfe5a9a920321ed24cdafaa7e440af9a4c8d4956d931654` |
+| `bindings_sbc_levers.yaml` | `e5b35b4a12c972b8f6273f769ce392961023a348b53655d7f8a2b2c790ecfc33` |
 | `bindings_sbc_mouse_aim.yaml` | `7e5c7eb0f84b8c03ec30dda6b28713e94dfc65102c26c5b1b4d14ab8366cf477` |
 | `bindings_sbc_pedal_fire.yaml` | `4079708b07a2595f2c48b30a8d4b023743b4234b33a435bb783f7c7fac85657d` |
 | `bindings_sbc_wire.yaml` | `2f5c2e53a7d212ec96fbe34b8c0b35cf394c8196a5fd5a3a7bef2e68b280da47` |
@@ -21,7 +27,7 @@ cascade of a refusal as well. Refresh from the app in one commit, with this tabl
 | `bindings_vr_aim_stick.yaml` | `f54710d3e1a68c84383e412c622e9f164f6e7c971ae93fb22f6302da55633649` |
 | `bindings_vr_sticks.yaml` | `41d5181b480bfded7354d7a5ac3717dd63311a720b0a61be12c61de0d6d81e4e` |
 | `bindings_wheel.yaml` | `a582684ea0c15f62f88a29a732294ac7c5fb79f5a361467c1b9e92b79a625f96` |
-| `calibration_pedals.yaml` | `5b2d3c904a5cc201f9b8b30edd4d9e7334963412c56bbc64dc8ac460091d27d0` |
+| `calibration_pedals.yaml` | `67e64866c99bd068bb66beb51710f249869381b5ef3c35791678c7bf9745500a` |
 | `device_desk_mouse.yaml` | `2e03b6a6f42e26c9dd5610018c5ea537c7beb3970ca9fddf26e1ec6476813089` |
 | `device_racing_pedals.yaml` | `8f8309b4fe5588c5c0f1d47775cf40221153342575874ba7c5513c8921d52d23` |
 | `device_sbc_wire.yaml` | `fa84b60e4351cf9ccce1cc489b7b4dd52f3b3e979970bd045255a31fb90a1010` |

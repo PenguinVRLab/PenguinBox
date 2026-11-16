@@ -1,0 +1,19 @@
+# BAD fixture (work/0039): device_desk_mouse.yaml with one change: the wheel's code is 4294967312 (a 32-bit reader narrows it to 16). Load the good set with this file IN PLACE OF
+# device_desk_mouse.yaml; it must be refused with CODE_RANGE (a relative input's code is 0..REL_MAX, 0x0f).
+# A three-button mouse with a wheel and one side button: the schema's worked example of a `mouse` source
+# (docs/profile-schema.md 2). Every input carries its Linux evdev code: a `relative` input the REL_* code of its
+# EV_REL events, a button the BTN_* code of its EV_KEY events (input-event-codes.h: REL_X 0x00 :818, REL_Y 0x01 :819,
+# REL_WHEEL 0x08 :826, BTN_LEFT 0x110 :356, BTN_RIGHT 0x111 :357, BTN_MIDDLE 0x112 :358, BTN_SIDE 0x113 :359).
+# A relative input reports motion, never a position: no min, rest or max.
+schema: sim-profile/1
+kind: device
+id: desk_mouse
+source: mouse
+inputs:
+  - { id: rel_x, kind: relative, code: 0 }
+  - { id: rel_y, kind: relative, code: 1 }
+  - { id: wheel, kind: relative, code: 4294967312 }
+  - { id: left, kind: button, code: 272 }
+  - { id: right, kind: button, code: 273 }
+  - { id: middle, kind: button, code: 274 }
+  - { id: side, kind: button, code: 275 }

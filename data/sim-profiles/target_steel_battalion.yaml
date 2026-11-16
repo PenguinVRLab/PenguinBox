@@ -47,7 +47,9 @@ controls:
   - { id: left_pedal,      kind: axis, min: 0, rest: 0, max: 65535, block: pedals, anchor: [330, 460] }
   - { id: middle_pedal,    kind: axis, min: 0, rest: 0, max: 65535, block: pedals, anchor: [450, 460] }
   - { id: right_pedal,     kind: axis, min: 0, rest: 0, max: 65535, block: pedals, anchor: [570, 460] }
-  - { id: gear_lever,      kind: detent }
+  # gear_lever positions are the wire values: R = 254, N = 255, gears 1-5 (devices/sbc.py GEAR_NAMES; S-79). The real
+  # lever sends 0 between gears: 0 is not a position, and it passes through to the game unchanged (the owner, "option c").
+  - { id: gear_lever,      kind: detent, positions: [254, 255, 1, 2, 3, 4, 5] }
   - { id: tuner_dial,      kind: detent, positions: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }
   - { id: main_weapon, kind: button }
   - { id: sub_weapon, kind: button }

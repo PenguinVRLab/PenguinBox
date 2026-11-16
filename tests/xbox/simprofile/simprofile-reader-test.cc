@@ -315,20 +315,20 @@ static void part_i()
             { "ports_pp.yaml", ports } };
     };
     i_refused("nan-max", i_world("nan-max", base(i_dev("min: -1, rest: -1, max: .nan"), i_bind(trig), i_ports())),
-              "DESCRIPTOR_INVALID", "device:dv.inputs[0]");
+              "RANGE_NOT_FINITE", "device:dv.inputs[0].max");
     {
         auto w = base(i_dev(ax), i_bind(trig), i_ports(unit));
         w.push_back({ "calibration_cc.yaml", std::string(I_HDR) + "kind: calibration\nid: cc\ndevice: dv\nport_path: "
                       "\"pci-0000:00:14.0-usb-0:1:1.0\"\ninputs: { ax: { min: 0, rest: 0, max: .nan } }\n" });
-        i_refused("nan-calibration", i_world("nan-calibration", w), "DESCRIPTOR_INVALID", "calibration:cc.inputs.ax",
+        i_refused("nan-calibration", i_world("nan-calibration", w), "RANGE_NOT_FINITE", "calibration:cc.inputs.ax.max",
                   false);
     }
     i_refused("nan-target", i_world("nan-target", {
         { "target_tt.yaml", std::string(I_HDR) + "kind: target\nid: tt\ncontrols:\n"
                             "  - { id: c0, kind: axis, min: 5, rest: 5, max: .nan }\n" } }),
-              "DESCRIPTOR_INVALID", "target:tt.controls[0]", false);
+              "RANGE_NOT_FINITE", "target:tt.controls[0].max", false);
     i_refused("inf-max", i_world("inf-max", base(i_dev("min: 0, rest: 0, max: .inf"), i_bind(trig), i_ports())),
-              "DESCRIPTOR_INVALID", "device:dv.inputs[0]");
+              "RANGE_NOT_FINITE", "device:dv.inputs[0].max");
     i_refused("tag-local", i_world("tag-local", base(i_dev("min: 0, rest: 0, max: !foo 1000"), i_bind(trig),
                                                      i_ports())),
               "PARSE_ERROR", "I-tag-local/device_dv.yaml");
@@ -386,27 +386,44 @@ static void part_i()
     i_refused("int-id-by-text", i_world("int-id-by-text", base(
                   std::string(I_HDR) + "kind: device\nid: dv\nsource: sdl_joystick\ninputs:\n  - { id: 5, kind: button }\n",
                   i_bind("  - { source: \"5\", target: start }\n"), i_ports())),
-              "UNKNOWN_SOURCE", "bindings:bd.bind[0]");
+              "ID_TYPE", "device:dv.inputs[0].id");
     const std::string gate = std::string(I_HDR) + "kind: device\nid: dv\nsource: sdl_joystick\ninputs:\n"
                                                   "  - { id: g, kind: detent, positions: ";
     i_refused("detent-text", i_world("detent-text", base(gate + "[\"1\", \"2\"] }\n",
                                                          i_bind("  - { source: g, target: start, position: 1 }\n"),
                                                          i_ports())),
               "DETENT_POSITION", "bindings:bd.bind[0]");
+    i_refused("detent-float", i_world("detent-float", base(gate + "[1, 2] }\n",
+                                                           i_bind("  - { source: g, target: start, position: 1.0 }\n"),
+                                                           i_ports())),
+              "DETENT_POSITION", "bindings:bd.bind[0]");
     {
-        std::string dir = i_world("detent-float", base(gate + "[1, 2] }\n",
-                                                       i_bind("  - { source: g, target: start, position: 1.0 }\n"),
-                                                       i_ports()));
+        std::string dir = i_world("detent-int", base(gate + "[1, \"2\"] }\n",
+                                                     i_bind("  - { source: g, target: start, position: 1 }\n"),
+                                                     i_ports()));
         SimProfileSet *s = sim_profile_set_load(DATA.c_str(), dir.c_str());
         SimPort p[SIM_PROFILE_MAX_PORTS];
         bool ok = sim_profile_set_nrefused(s) == 0 && sim_profile_set_ports(s, "pp", p) == 1 &&
                   p[0].devices[0].nbindings == 1 && !std::strcmp(p[0].devices[0].bindings[0].position, "1");
-        expect("I detent-float: position 1.0 against positions [1, 2] is accepted, as the position \"1\"", ok);
+        const SimInput *g = ok ? p[0].devices[0].bindings[0].source : nullptr;
+        ok = ok && g->npositions == 2 && g->position_kinds && g->position_kinds[0] == 'I' &&
+             g->position_ints[0] == 1 && g->position_kinds[1] == 'S';
+        expect("I detent-int: position 1 against positions [1, \"2\"] is accepted; the positions are typed I, S", ok);
         if (!ok) {
             print_refusals(s);
         }
         sim_profile_set_free(s);
     }
+    for (const auto &q : std::vector<std::pair<const char *, const char *>>{
+             { "detent-bool-position", "[1, true] }\n" }, { "detent-float-position", "[1, 2.5] }\n" },
+             { "detent-list-position", "[1, [2]] }\n" } }) {
+        i_refused(q.first, i_world(q.first, base(gate + q.second, i_bind(start), i_ports())), "DETENT_POSITIONS",
+                  "device:dv.inputs[0]");
+    }
+    i_refused("detent-no-positions", i_world("detent-no-positions", base(
+                  std::string(I_HDR) + "kind: device\nid: dv\nsource: sdl_joystick\ninputs:\n  - { id: g, kind: detent }\n"
+                  "  - { id: bt, kind: button }\n", i_bind(start), i_ports())),
+              "DETENT_POSITIONS_REQUIRED", "device:dv.inputs[0]");
     {
         std::string dir = i_world("assign-int", {
             { "device_dv.yaml", i_dev(ax) }, { "bindings_bd.yaml", i_bind(start) },
@@ -424,6 +441,49 @@ static void part_i()
                       "\"pci-0000:00:14.0-usb-0:1:1.0\"\ninputs: { zz: { min: 0, rest: 0, max: 900 } }\n" });
         i_refused("calibration-unknown-input", i_world("calibration-unknown-input", w), "UNKNOWN_SOURCE",
                   "calibration:cc.inputs.zz", false);
+    }
+    auto dev_src = [&](const std::string &source, const std::string &inputs) {
+        return std::string(I_HDR) + "kind: device\nid: dv\nsource: " + source + "\ninputs:\n" + inputs;
+    };
+    const std::string bt_in = "  - { id: bt, kind: button }\n";
+    for (const auto &q : std::vector<std::pair<const char *, std::string>>{
+             { "code-axis-past-absmax", dev_src("sdl_joystick", "  - { id: ax, kind: axis, min: 0, rest: 0, max: 9, code: 64 }\n" + bt_in) },
+             { "code-axis-negative", dev_src("sdl_joystick", "  - { id: ax, kind: axis, min: 0, rest: 0, max: 9, code: -1 }\n" + bt_in) },
+             { "code-hat-no-room-for-y", dev_src("sdl_joystick", "  - { id: h, kind: hat, code: 63 }\n" + bt_in) },
+             { "code-button-past-keymax", dev_src("sdl_joystick", "  - { id: bt, kind: button, code: 768 }\n") },
+             { "code-relative-past-relmax", dev_src("mouse", "  - { id: r, kind: relative, code: 16 }\n  - { id: bt, kind: button, code: 272 }\n") },
+             { "code-huge-hid", dev_src("hid_usb", "  - { id: bt, kind: button, code: 4294967312 }\n") },
+             { "code-past-64-bits-hid", dev_src("hid_usb", "  - { id: bt, kind: button, code: 99999999999999999999 }\n") } }) {
+        i_refused(q.first, i_world(q.first, base(q.second, i_bind(start), i_ports())), "CODE_RANGE", "device:dv.inputs[");
+    }
+    i_refused("scancode-past-keymax", i_world("scancode-past-keymax", base(
+                  dev_src("keyboard", "  - { id: bt, kind: button, scancode: 768 }\n"), i_bind(start), i_ports())),
+              "CODE_RANGE", "device:dv.inputs[0].scancode");
+    {
+        std::string dir = i_world("code-edges-ok", base(
+            dev_src("sdl_joystick", "  - { id: ax, kind: axis, min: 0, rest: 0, max: 9, code: 63 }\n"
+                                    "  - { id: h, kind: hat, code: 62 }\n  - { id: bt, kind: button, code: 767 }\n"),
+            i_bind(start), i_ports()));
+        SimProfileSet *s = sim_profile_set_load(DATA.c_str(), dir.c_str());
+        SimPort p[SIM_PROFILE_MAX_PORTS];
+        bool ok = sim_profile_set_nrefused(s) == 0 && sim_profile_set_ports(s, "pp", p) == 1 &&
+                  p[0].devices[0].ninputs == 3 && p[0].devices[0].inputs[0].code == 63 &&
+                  p[0].devices[0].inputs[1].code == 62 && p[0].devices[0].inputs[2].code == 767;
+        expect("I code-edges-ok: axis 63, hat 62 and button 767 on sdl_joystick load, codes kept", ok);
+        if (!ok) {
+            print_refusals(s);
+        }
+        sim_profile_set_free(s);
+        dir = i_world("code-hid-ok", base(dev_src("hid_usb", "  - { id: bt, kind: button, code: 70000 }\n"),
+                                          i_bind(start), i_ports()));
+        s = sim_profile_set_load(DATA.c_str(), dir.c_str());
+        ok = sim_profile_set_nrefused(s) == 0 && sim_profile_set_ports(s, "pp", p) == 1 &&
+             p[0].devices[0].inputs[0].code == 70000;
+        expect("I code-hid-ok: a hid_usb button code 70000 (past KEY_MAX) loads, kept as 70000", ok);
+        if (!ok) {
+            print_refusals(s);
+        }
+        sim_profile_set_free(s);
     }
     long long i = 0;
     expect("I scalar: 2026-11-15 and 2026-1-5 1:02:03 are timestamps ('O'), 2026-11-15x a string",
@@ -614,7 +674,7 @@ int main(int argc, char **argv)
     print_refusals(b);
     expect("B: the good set loads with no refusal", sim_profile_set_nrefused(b) == 0);
     std::vector<std::string> good = yaml_files(GOOD);
-    expect("B: 30 good fixtures vendored", good.size() == 30);
+    expect("B: 31 good fixtures vendored", good.size() == 31);
     int filed = 0;
     for (const auto &n : good) {
         std::string t = slurp(GOOD + "/" + n), kind = top(t, "kind"), id = top(t, "id");
@@ -624,7 +684,7 @@ int main(int argc, char **argv)
             expect("B: " + n + " filed as " + kind + ":" + id, false);
         }
     }
-    expect("B: every good fixture is filed under its kind and id", filed == 30);
+    expect("B: every good fixture is filed under its kind and id", filed == 31);
 
     SimPort ports[SIM_PROFILE_MAX_PORTS];
     int on = sim_profile_set_ports(b, nullptr, ports);
@@ -778,9 +838,9 @@ int main(int argc, char **argv)
               SimPort p[4];
               sim_profile_set_ports(s, nullptr, p);
               const SimPortDevice *d = dev_of(p[0], "racing_pedals");
-              expect("D calibration-joined: the unit at that port path gets its calibration (accel -32768/-32700/32100)",
+              expect("D calibration-joined: the unit at that port path gets its calibration (accel -32768/-32768/32100)",
                      sim_profile_set_nrefused(s) == 0 && d && d->ncalibrated == 1 &&
-                     !std::strcmp(d->calibrated[0].input->id, "accel") && d->calibrated[0].range.rest == -32700 &&
+                     !std::strcmp(d->calibrated[0].input->id, "accel") && d->calibrated[0].range.rest == -32768 &&
                      d->calibrated[0].range.max == 32100);
           } },
         { "invert-type", "device_wheel.yaml", "{ id: steering, kind: axis, min: -32768, rest: 0, max: 32767 }", "{ id: steering, kind: axis, min: -32768, rest: 0, max: 32767, invert: 1 }", "INVERT_TYPE", "device:wheel", nullptr },
@@ -830,8 +890,8 @@ int main(int argc, char **argv)
         { "profile-map", "profile_sbc_real.yaml", "bindings: { sbc_wire: sbc_identity }", "bindings: [ sbc_identity ]", "BINDINGS_MAP_SHAPE", "profile:sbc_real", nullptr },
         { "profile-target-ref", "profile_sbc_real.yaml", "target: steel_battalion", "target: [steel_battalion]", "MISSING_REF", "profile:sbc_real", nullptr },
         { "profile-target-unknown", "profile_sbc_real.yaml", "target: steel_battalion", "target: atari_paddle", "UNRESOLVED_REF", "profile:sbc_real", nullptr },
-        { "calibration-range", "calibration_pedals.yaml", "accel: { min: -32768, rest: -32700, max: 32100 }", "accel: { min: -32768, max: 32100 }", "DESCRIPTOR_INCOMPLETE", "calibration:pedals_unit_a", nullptr },
-        { "calibration-invalid", "calibration_pedals.yaml", "accel: { min: -32768, rest: -32700, max: 32100 }", "accel: { min: 5, rest: 9, max: 5 }", "DESCRIPTOR_INVALID", "calibration:pedals_unit_a", nullptr },
+        { "calibration-range", "calibration_pedals.yaml", "accel: { min: -32768, rest: -32768, max: 32100 }", "accel: { min: -32768, max: 32100 }", "DESCRIPTOR_INCOMPLETE", "calibration:pedals_unit_a", nullptr },
+        { "calibration-invalid", "calibration_pedals.yaml", "accel: { min: -32768, rest: -32768, max: 32100 }", "accel: { min: 5, rest: 9, max: 5 }", "DESCRIPTOR_INVALID", "calibration:pedals_unit_a", nullptr },
         { "calibration-ref", "calibration_pedals.yaml", "device: racing_pedals", "device: [racing_pedals]", "MISSING_REF", "calibration:pedals_unit_a", nullptr },
         { "rtr-ok", "zz_target.yaml", nullptr, "schema: sim-profile/1\nkind: target\nid: rtr_t\ncore: xbox\ncontrols:\n  - { id: lever, kind: axis, min: 0, rest: 50, max: 100, returns_to_rest: false }\n  - { id: stick, kind: axis, min: 0, rest: 50, max: 100, returns_to_rest: true }\n  - { id: plain, kind: axis, min: 0, rest: 50, max: 100 }\n", nullptr, nullptr,
           [](const SimProfileSet *s) {
@@ -968,7 +1028,7 @@ int main(int argc, char **argv)
             }
             sim_profile_set_free(s);
         }
-        expect("G: the app's 46 bad fixtures, each refused with its code", rows == 46 && hit == rows);
+        expect("G: the app's 59 bad fixtures, each refused with its code", rows == 59 && hit == rows);
     }
 
     struct Sc { const char *text; char kind; long long i; double d; } sc[] = {

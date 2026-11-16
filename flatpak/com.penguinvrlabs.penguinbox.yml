@@ -224,6 +224,10 @@ modules:
       # the metainfo is generated from flatpak/penguinbox.metainfo.xml.in, with the
       # release's version and date, when the source tree is released
       - install -Dm644 ../flatpak/com.penguinvrlabs.penguinbox.metainfo.xml $FLATPAK_DEST/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      # PenguinBox's own Sim Configurator documents: the boot reads them at <exe>/../share/penguinbox/sim-profiles
+      # (xemu-vr-8d's boot lane; the AppImage installs the same folder). The whole folder is copied, because the
+      # reader walks sub-folders too.
+      - mkdir -p $FLATPAK_DEST/share/penguinbox && cp -r ../data/sim-profiles $FLATPAK_DEST/share/penguinbox/sim-profiles
     sources:
       # PenguinBox fork — build this working tree, not a xemu release tarball.
       - type: dir

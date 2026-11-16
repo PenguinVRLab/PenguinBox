@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simsbc: the real Steel Battalion controller one to one (written for this test, not the app's).
+schema: sim-profile/1
+kind: profile
+id: sbc_levers_only
+name: "the shipped lever bindings alone"
+target: steel_battalion
+game: { title_id: 0x43430002, name: "Steel Battalion" }
+bindings:
+  steel_battalion_controller: sbc_levers

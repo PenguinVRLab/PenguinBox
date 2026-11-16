@@ -8,7 +8,8 @@
 # once, the brake twice and the throttle three times, so the count names the axis whatever the order;
 # tests/fixtures/evtest/rig_2026-10-10_g923_pedals_counted.txt): clutch = ABS_Y (code 1), brake = ABS_RZ (5),
 # throttle = ABS_Z (2), each 0..255, resting at 255 (released) and 0 fully pressed: inverted, so `rest` is the top.
-# Joystick profiles carry no codes yet (work/0010); these comments are the codes for that work.
+# The codes and ranges below are what Device Studio makes from that recording (work/0042; checked by
+# tests/test_shipped_devices_from_recordings.py): each pedal in the range the unit reports, 0..255, resting at 255.
 schema: sim-profile/1
 kind: device
 id: g923_pedals
@@ -20,10 +21,10 @@ match_also:
   - { vid: 0x046d, pid: 0xc26e }
   - { vid: 0x046d, pid: 0xc26d }
 art: devices/art/g923_pedals.svg
-# Input ids name a control's position or function; the real button and axis codes are captured on
-# the owner's hardware with press-to-identify (work/0009, work/0010), and the descriptor ranges are
-# placeholders until then. Anchors are points in the art's viewBox.
+# Input ids name a control's position or function. Codes and axis ranges come from the owner's recording through
+# Device Studio (work/0042; docs/hardware/device-coverage.md lists what no recording covers). Anchors are points
+# in the art's viewBox.
 inputs:
-  - { id: clutch, kind: axis, code: 1, min: -32768, rest: 32767, max: 32767, anchor: [147, 62], label: "Clutch" }  # ABS_Y
-  - { id: brake, kind: axis, code: 5, min: -32768, rest: 32767, max: 32767, anchor: [250, 64], label: "Brake" }  # ABS_RZ
-  - { id: throttle, kind: axis, code: 2, min: -32768, rest: 32767, max: 32767, anchor: [370, 78], label: "Throttle" }  # ABS_Z
+  - { id: clutch, kind: axis, code: 1, min: 0, rest: 255, max: 255, anchor: [147, 62], label: "Clutch" }  # ABS_Y
+  - { id: brake, kind: axis, code: 5, min: 0, rest: 255, max: 255, anchor: [250, 64], label: "Brake" }  # ABS_RZ
+  - { id: throttle, kind: axis, code: 2, min: 0, rest: 255, max: 255, anchor: [370, 78], label: "Throttle" }  # ABS_Z

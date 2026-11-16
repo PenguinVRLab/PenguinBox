@@ -34,6 +34,7 @@
 #include "actions.hh"
 #include "common.hh"
 #include "../xemu-input.h"
+#include "../xemu-sim-boot.h"
 #include "xemu-hud.h"
 #include "misc.hh"
 #include "gl-helpers.hh"
@@ -479,7 +480,9 @@ void xemu_hud_update(void)
             bool mod_key_down = ImGui::IsKeyDown(ImGuiKey_ModShift);
             for (int f_key = 0; f_key < 4; ++f_key) {
                 if (ImGui::IsKeyPressed((enum ImGuiKey)(ImGuiKey_F5 + f_key))) {
-                    ActionActivateBoundSnapshot(f_key, mod_key_down);
+                    if (!xemu_sim_boot_hotkey_held(SDL_SCANCODE_F5 + f_key)) {
+                        ActionActivateBoundSnapshot(f_key, mod_key_down);
+                    }
                     break;
                 }
             }

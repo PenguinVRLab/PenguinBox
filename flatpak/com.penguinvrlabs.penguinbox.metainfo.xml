@@ -24,6 +24,6 @@
     <binary>xemu</binary>
   </provides>
   <releases>
-    <release version="0.1-beta" date="2026-11-15"/>
+    <release version="0.1-beta" date="2026-11-16"/>
   </releases>
 </component>

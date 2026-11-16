@@ -54,6 +54,15 @@ xemu_ss.add(files('xemu-sim-profile-reader.cc'), ryml)
 # The merge layer (B-SHIP-1 XB-6): the arithmetic core, the writers into the controllers' state, and the port that
 # drives them (INPUT_DEVICE_SIM_PORT). Tests: tests/xbox/simmerge (make check; make drill; make keys).
 xemu_ss.add(files('xemu-sim-merge.c', 'xemu-sim-target.c', 'xemu-sim-port.c'))
+# The plan of a Sim Configurator boot (B-SHIP-1 S-55): pure C, which console port is driven by which profile, or why
+# the boot is refused. Test: tests/xbox/simboot (make check; make drill).
+xemu_ss.add(files('xemu-sim-bootplan.c'))
+# Joysticks, wheels and pedals read by port path from evdev (B-SHIP-1 XB-7): pure C, Linux (other hosts refuse).
+# Test: tests/xbox/simevdev (make check; make drill; make list).
+xemu_ss.add(files('xemu-sim-evdev.c'))
+# The real Steel Battalion controller as a Sim Configurator source: its frames to the device document's inputs, by id,
+# and its panel lights. Pure C. Test: tests/xbox/simsbc (make check; make drill).
+xemu_ss.add(files('xemu-sim-sbc-source.c'))
 # The Sim Configurator hand-off's D-Bus activation route (B-SHIP-1 D3): with gio, else a stub that says so
 if gio.found()
   xemu_ss.add(files('xemu-sim-dbus.c'), gio)

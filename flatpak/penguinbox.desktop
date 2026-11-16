@@ -7,3 +7,4 @@ Exec=xemu
 Icon=com.penguinvrlabs.penguinbox
 Terminal=false
 Categories=Game;Emulator;
+PrefersNonDefaultGPU=true

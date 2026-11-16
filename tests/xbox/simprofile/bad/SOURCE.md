@@ -3,11 +3,17 @@
 SPDX-FileCopyrightText: 2026 Patrick Carey
 SPDX-License-Identifier: MIT
 
-Copied unchanged from the sim-configurator repo (MIT, the same author) at its `main` `80d47c2072fe25498f6806c3cdf389d4bd590329` (2026-11-15), `tests/fixtures/bad/`: 46 rows (35-37 the
-response-range refusals, 38-46 the S-74 rules).
-Each row of `MANIFEST.tsv`: load `../good/` with `file` IN PLACE OF `replaces`; the reader must refuse with `code`
-(test part G). `good_sha256` is the good file the row was made from: `make check` fails when it no longer matches the
-vendored good file (a stale row). Refresh with good/ in one commit; never edit them here.
+Copied unchanged from the sim-configurator repo (MIT, the same author) at its `main`
+`ee9e736288b733250867c79c1603052d2efb8a8c` (2026-11-15; it carries the branch
+`dm4800/feat/contract-levers-hats-20261115`, first vendored here from its tip `8515ae4`). At that commit
+`tests/fixtures/merge/vectors.yaml` has sha256 `03e6a916445ee6f0ab517e36eb30ae5a42123d8eae24b50fb51f559cd4d1c02e` and
+`tests/fixtures/bad/MANIFEST.tsv` sha256 `84b97f09edc092e12c4a68df31cdaca667309207e7a7b62c83457afef57512ab`.
+`tests/fixtures/bad/`: 59 rows (47-54 the app's S-77 hardening, 55-59 its S-78 to S-84: calibration polarity, lever
+positions required, the evdev code range, a calibration outside its device's range, lever to lever between other
+positions; 29 and 52 remade from the corrected good calibration_pedals.yaml).
+Each row of `MANIFEST.tsv`: load `../good/` with `file` IN PLACE OF `replaces`; the reader must refuse with `code` (test
+part G). `good_sha256` is the good file the row was made from: `make check` fails when it no longer matches the vendored
+good file (a stale row). Refresh with good/ in one commit; never edit them here.
 
 | File | sha256 |
 |---|---|
@@ -39,7 +45,7 @@ vendored good file (a stale row). Refresh with good/ in one commit; never edit t
 | `26_port_path_shape.yaml` | `7b7c6ae90862d5b2fa0b6a067cd27d23059e48cb74c88b79edf83826fbfe8278` |
 | `27_port_device.yaml` | `ee02330d047ad8c0b336dace0173554a293899b2ef189745f08a88dd56cf8495` |
 | `28_last_used_shape.yaml` | `71f85ae546aecafba39cacf70eca9fd804aaee2d34f54c7d131d8f8d113effbe` |
-| `29_port_path_required.yaml` | `928d11dc5e935f9d5e00f2f8ccc8b93f807d64a61234eb2f090260ac25fe7aac` |
+| `29_port_path_required.yaml` | `bbcceac3a0c1cd0ef62c815b7effa8ec654638379ee1824012c566fd13f81d0a` |
 | `30_mirror_type.yaml` | `5fa044aa9b54c8a922e02b52c74224a1387fae6948a456ac9c789eff4c199a48` |
 | `31_devices_required.yaml` | `20c6b8f49714eaecbfe1815d66959a49aae4afa2502bbf63312f4db1aac8757d` |
 | `32_detent_positions.yaml` | `1ad15f7af41914074ecc1bc313025b05fd5fa1b1ec8a560012e01ec62255b812` |
@@ -57,4 +63,17 @@ vendored good file (a stale row). Refresh with good/ in one commit; never edit t
 | `44_ramp_on_stay_put.yaml` | `e924725a37c9b127d2e59fd9dee6b19679b76ff5c14dfb7f1634e1b48f0cd97f` |
 | `45_axis_to_button_threshold_range.yaml` | `9b3c5340a43a4dea683d2015a4c46b31c1ec1831b9926498c08af0ffbdac18df` |
 | `46_axis_to_button_hysteresis.yaml` | `7c051424ce50e3d39a07d0c738de5799d457b8eb909b18f9edc188da047b6609` |
-| `MANIFEST.tsv` | `04cbde3fb8dc0a7efa6c5edbb8ed487c63033607f53dc9ac72e4d80cf6662541` |
+| `47_id_type.yaml` | `a6c7e703c2386c202f782942e04abed41956c9f6bb5350fc21bc5b653b5a9808` |
+| `48_range_not_number.yaml` | `8159e3c90b555c6cbb048c9663d94a73e9bcc29ed0754388fd4e9bad56ecaa7b` |
+| `49_range_not_finite.yaml` | `8525dd06c71e2ba33b562a2f7cf1853f33dd8c0d5e1cfda8c496d067f849f49c` |
+| `50_response_shape.yaml` | `b0de5fbe223b36c5c71fac2625b7d3693c336cc7ef9b1454072535423b8117f4` |
+| `51_merge_key.yaml` | `107b8776dd544c99a6dd749327237fe69fbb5a39457ddd061aaa3ef22f6b76c8` |
+| `52_calibration_shape.yaml` | `37261d31c7c4f88c54d32e2955578b2f650d2a7825da1559d9eceb9370c3b5a5` |
+| `53_detent_position.yaml` | `a8a6fc9dd9e3dfc52e16ebaf7c3b017640d0712b6886632c24130c1c1e79a1b8` |
+| `54_relative_needs_integrate.yaml` | `feed716ac3f3f22f64ce4121bba6fc8cd093deebfb0482c6cce0216a7452db1f` |
+| `55_calibration_polarity.yaml` | `7d15715c9f9e41d1c425f3cce47291dc43aaa95cd7a9c541f93c8c6e00acd6a5` |
+| `56_detent_positions_required.yaml` | `3aa6c589e2709e98006d237931d190b67bdeb45c15f6734562fc9b07719e1429` |
+| `57_code_range.yaml` | `f913fa6658cde732e76330225a34848d9df0c85c0d5c4176ab32f6d258adfcab` |
+| `58_calibration_out_of_range.yaml` | `58a6d5b141af8403f72b49227af1294a7a3d064b3b462d208030decff9e21c93` |
+| `59_detent_positions_differ.yaml` | `dc30a1297bf8f13c3fc341a4b6d5379b544e3cd2e493ff35e3cbdcbe041d25fb` |
+| `MANIFEST.tsv` | `84b97f09edc092e12c4a68df31cdaca667309207e7a7b62c83457afef57512ab` |

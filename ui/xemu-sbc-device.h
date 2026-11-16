@@ -73,6 +73,17 @@ bool sbc_decode_report(const uint8_t *raw, uint8_t len, SbcFrame *out);
 SbcDeviceStatus sbc_device_probe(char *detail, size_t detail_len);
 bool sbc_device_host_reader_armed(void);
 
+SbcDeviceStatus sbc_device_serve_begin(char *detail, size_t detail_len);
+void sbc_device_serve_end(const uint8_t *off, size_t len);
+bool sbc_device_serving(void);
+
+
+bool sbc_device_send_output(const uint8_t *report, size_t len);
+void sbc_device_forget_output(void);
+uint64_t sbc_device_sink_last(uint8_t *out, size_t *len);
+uint64_t sbc_device_output_sent(void);
+uint64_t sbc_device_output_errors(void);
+
 #ifdef __cplusplus
 }
 #endif

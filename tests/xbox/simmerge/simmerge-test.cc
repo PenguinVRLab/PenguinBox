@@ -494,8 +494,81 @@ static void part_d_hostile_values()
            sim_merge_sbc_aiming_axis(-INFINITY) == -32768);
 }
 
+static void part_d_levers()
+{
+    static const char *const pos[] = { "254", "255", "1", "2" };
+    static const char kinds[] = "IIII";
+    static const long long ints[] = { 254, 255, 1, 2 };
+    auto lever = [&](SimInput *x) {
+        x->npositions = 4;
+        x->positions = pos;
+        x->position_kinds = kinds;
+        x->position_ints = ints;
+    };
+    {
+        Multi u;
+        SimInput *g = u.input("gear", SIM_IN_DETENT), *g2 = u.input("gear2", SIM_IN_DETENT);
+        lever(g);
+        lever(g2);
+        SimInput *t = u.target(0, "gear_lever", SIM_IN_DETENT);
+        lever(t);
+        u.bind(g, t);
+        u.bind(g2, t);
+        SimMerge *m = u.build();
+        const SimMergeOut *o = step(m, { -1, sim_merge_detent_int(g2, 255) }, "gear_lever");
+        expect("D lever: the first binding has no reading, the second's 255 passes (position 1)",
+               o->has_reading && o->raw == 255 && o->position == 1 && !o->pressed);
+        o = step(m, { sim_merge_detent_int(g, 0), sim_merge_detent_int(g2, 1) }, "gear_lever");
+        expect("D lever: both read; the first binding's unlisted 0 wins (raw 0, position -1)",
+               o->has_reading && o->raw == 0 && o->position == -1);
+        bool none = true;
+        for (double h : { (double)NAN, (double)INFINITY, SIM_DETENT_UNLISTED + 0.5, 1e300, -SIM_DETENT_UNLISTED, 2.5,
+                          4.0, SIM_DETENT_UNLISTED * 2 }) {
+            o = step(m, { h, h }, "gear_lever");
+            none = none && !o->has_reading && o->raw == 0 && o->position == -1;
+        }
+        expect("D lever: NaN, inf, 2^40 + 0.5, 1e300, -2^40, 2.5, 4 (past the positions), 2^41: no reading", none);
+        const double *absent[1] = { nullptr };
+        sim_merge_update(m, absent);
+        o = sim_merge_find(m, "gear_lever");
+        expect("D lever: the device absent: no reading", !o->has_reading);
+        o = step(m, { SIM_DETENT_UNLISTED + 2, -1 }, "gear_lever");
+        expect("D lever: a listed position written as unlisted (2^40 + 2) is that position (3, raw 2)",
+               o->has_reading && o->position == 3 && o->raw == 2);
+        expect("D lever: detent_int: 2 is position 3, 0 is 2^40 + 0, -5 is 2^40 - 5, 2^39 cannot be carried (-1)",
+               sim_merge_detent_int(g, 2) == 3 && sim_merge_detent_int(g, 0) == SIM_DETENT_UNLISTED &&
+               sim_merge_detent_int(g, -5) == SIM_DETENT_UNLISTED - 5 &&
+               sim_merge_detent_int(g, 549755813888LL) == -1 && sim_merge_detent_int(g, -549755813888LL) == -1);
+        expect("D lever: detent_text: \"1\" on an integer lever is no position (-1)", sim_merge_detent_text(g, "1") == -1);
+        sim_merge_free(m);
+    }
+    {
+        static const char one_int[] = "1", one_text[] = "1";
+        static const char *const pos2[] = { one_int, one_text };
+        static const char kinds2[] = "IS";
+        static const long long ints2[] = { 1, 0 };
+        Multi u;
+        SimInput *g = u.input("g", SIM_IN_DETENT);
+        g->npositions = 2;
+        g->positions = pos2;
+        g->position_kinds = kinds2;
+        g->position_ints = ints2;
+        u.bind(g, u.target(0, "b", SIM_IN_BUTTON))->position = pos2[1];
+        SimMerge *m = u.build();
+        bool by_int = step(m, { sim_merge_detent_int(g, 1) }, "b")->pressed;
+        bool by_text = step(m, { sim_merge_detent_text(g, "1") }, "b")->pressed;
+        expect("D lever: [1, \"1\"], bound on \"1\": the integer 1 releases, the text \"1\" presses", !by_int && by_text);
+        sim_merge_free(m);
+    }
+    expect("D hat: sim_merge_hat_value: (0,0) 0; (-1,-1) left+up; (5,-5) right+up; (NaN,3) down; (inf,0) centred",
+           sim_merge_hat_value(0, 0) == 0 && sim_merge_hat_value(-1, -1) == (SIM_HAT_LEFT | SIM_HAT_UP) &&
+           sim_merge_hat_value(5, -5) == (SIM_HAT_RIGHT | SIM_HAT_UP) && sim_merge_hat_value(NAN, 3) == SIM_HAT_DOWN &&
+           sim_merge_hat_value(INFINITY, 0) == 0);
+}
+
 static void part_d()
 {
+    part_d_levers();
     {
         Multi u;
         SimInput *a = u.input("trig", SIM_IN_AXIS);
@@ -764,6 +837,78 @@ static void part_e(const std::string &data)
     expect("E: a second press unlatches it", tog == 0);
     sim_merge_free(m);
 
+    {
+        static const char *const gpos[] = { "254", "255", "1", "2", "3", "4", "5" };
+        static const char gkinds[] = "IIIIIII";
+        static const long long gints[] = { 254, 255, 1, 2, 3, 4, 5 };
+        static const char *const tpos[] = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+                                            "13", "14", "15" };
+        static const char tkinds[] = "IIIIIIIIIIIIIIII";
+        static const long long tints[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+        auto lever = [](SimInput *x, int n, const char *const *p, const char *k, const long long *v) {
+            x->npositions = n;
+            x->positions = p;
+            x->position_kinds = k;
+            x->position_ints = v;
+        };
+        Multi l;
+        SimInput *gs = l.input("gear_src", SIM_IN_DETENT), *ts = l.input("tuner_src", SIM_IN_DETENT);
+        SimInput *up = l.input("up_key", SIM_IN_BUTTON);
+        lever(gs, 7, gpos, gkinds, gints);
+        lever(ts, 16, tpos, tkinds, tints);
+        SimInput *gt = l.target(0, "gear_lever", SIM_IN_DETENT), *tt = l.target(1, "tuner_dial", SIM_IN_DETENT);
+        lever(gt, 7, gpos, gkinds, gints);
+        lever(tt, 16, tpos, tkinds, tints);
+        l.bind(gs, gt);
+        l.bind(ts, tt);
+        l.bind(up, l.target(2, "gear_up", SIM_IN_BUTTON));
+        SimMerge *lm = l.build();
+        uint64_t lb = 0, lp = 0;
+        uint8_t lg = 0, lt = 0, ltog = 0;
+        auto write = [&](double g, double t, double k) {
+            std::vector<double> v = { g, t, k };
+            const double *vals[1] = { v.data() };
+            sim_merge_update(lm, vals);
+            sim_target_write_sbc(lm, &lb, &lp, ax, &lg, &lt, &ltog);
+        };
+        std::vector<int> seen;
+        for (long long r : { 2LL, 0LL, 1LL, 0LL, 255LL, 0LL, 254LL }) {
+            write(sim_merge_detent_int(gs, r), sim_merge_detent_int(ts, 7), 0);
+            seen.push_back(lg);
+        }
+        expect("E: a lever on the gear lever: readings 2 0 1 0 255 0 254 reach the byte unchanged (0 stays 0); the "
+               "tuner dial reads 7", seen == std::vector<int>({ 2, 0, 1, 0, 255, 0, 254 }) && lt == 7);
+        write(sim_merge_detent_int(gs, 3), sim_merge_detent_int(ts, 7), 1);
+        expect("E: while the lever reads 3, a gear_up press does not step it", lg == 3);
+        lg = 0;
+        write(-1, -1, 0);
+        expect("E: the levers report nothing (-1): a gear lever at 0 becomes 255, the dial keeps 7", lg == 255 && lt == 7);
+        write(-1, -1, 1);
+        expect("E: ... and gear_up steps it again: 255 -> 1", lg == 1);
+        lg = 0;
+        const double *absent[1] = { nullptr };
+        sim_merge_update(lm, absent);
+        sim_target_write_sbc(lm, &lb, &lp, ax, &lg, &lt, &ltog);
+        expect("E: the device absent: a gear lever at 0 becomes 255 (as before)", lg == 255);
+        sim_merge_free(lm);
+
+        static const char *const npos[] = { "n", "r" };
+        Multi x;
+        SimInput *xs = x.input("g", SIM_IN_DETENT), *xt = x.target(0, "gear_lever", SIM_IN_DETENT);
+        lever(xs, 2, npos, "SS", nullptr);
+        lever(xt, 2, npos, "SS", nullptr);
+        x.bind(xs, xt);
+        SimMerge *xm = x.build();
+        double r = sim_merge_detent_text(xs, "n");
+        const double *rv[1] = { &r };
+        sim_merge_update(xm, rv);
+        lg = 0;
+        sim_target_write_sbc(xm, &lb, &lp, ax, &lg, &lt, &ltog);
+        expect("E: a text reading on a gear lever control is no byte: 0 becomes 255 (as before)",
+               sim_merge_find(xm, "gear_lever")->has_reading && lg == 255);
+        sim_merge_free(xm);
+    }
+
     Multi a;
     SimInput *sx = a.input("sx", SIM_IN_AXIS);
     sx->has_range = true;
@@ -843,6 +988,58 @@ static SimRange yrange(ryml::ConstNodeRef n)
     return SimRange{ ynum(n["min"]), ynum(n["rest"]), ynum(n["max"]) };
 }
 
+struct Typed {
+    char k;
+    long long i;
+    std::string s;
+    bool operator==(const Typed &o) const { return k == o.k && (k == 'I' ? i == o.i : s == o.s); }
+};
+
+static Typed ytyped(ryml::ConstNodeRef n)
+{
+    Typed t{ 0, 0, yval(n) };
+    t.k = sim_profile_scalar_kind(t.s.c_str(), n.is_val_quoted(), &t.i, nullptr);
+    return t;
+}
+
+static double lever_value(const SimInput *lever, const Typed &reading)
+{
+    return reading.k == 'I' ? sim_merge_detent_int(lever, reading.i) :
+           reading.k == 'S' ? sim_merge_detent_text(lever, reading.s.c_str()) : -1.0;
+}
+
+static double hat_value(double x, double y)
+{
+    return sim_merge_hat_value(x, y);
+}
+
+static bool lever_out_built()
+{
+    return true;
+}
+
+static bool lever_out_matches(const SimMergeOut *o, const Typed &want, std::string *why)
+{
+    bool ok = false;
+    std::string got = " no reading";
+    if (o && o->has_reading) {
+        const SimInput *c = o->control;
+        bool listed = o->position >= 0 && o->position < c->npositions;
+        char kind = listed ? (c->position_kinds ? c->position_kinds[o->position] : 'S') : 'I';
+        if (kind == 'I') {
+            ok = want.k == 'I' && o->raw == (double)want.i && (!listed || c->position_ints[o->position] == want.i);
+            got = " integer " + std::to_string((long long)o->raw);
+        } else {
+            ok = want.k == 'S' && want.s == c->positions[o->position];
+            got = std::string(" text ") + c->positions[o->position];
+        }
+    }
+    if (!ok) {
+        *why += " reading " + want.s + ":" + got;
+    }
+    return ok;
+}
+
 static void part_f(const std::string &dir)
 {
     std::string path = dir + "/shared/vectors.yaml";
@@ -863,13 +1060,15 @@ static void part_f(const std::string &dir)
     static const char *const known[] = { "id", "rule", "kind", "source", "target", "targets", "binding", "raw",
                                          "expect", "calibration", "source_invert", "value", "rounded", "wire",
                                          "axis", "byte", "steps", "returns_to_rest", "bindings", "raws", "rates",
-                                         "integrates" };
+                                         "integrates", "positions", "readings" };
     static const char *const known_binding[] = { "policy", "invert", "window", "deadzone", "saturation", "curve",
-                                                 "counts_per_travel", "threshold", "hysteresis" };
+                                                 "counts_per_travel", "threshold", "hysteresis", "position",
+                                                 "direction" };
+    const bool table = getenv("SIMMERGE_VECTOR_TABLE") != nullptr;
     int n = 0, bad = 0;
     for (ryml::ConstNodeRef v : vectors.children()) {
         std::string id = yval(v["id"]), kind = yval(v["kind"]);
-        bool ok = true;
+        bool ok = true, not_built = false;
         std::string why;
         for (ryml::ConstNodeRef k : v.children()) {
             std::string key(k.key().str, k.key().len);
@@ -1166,6 +1365,88 @@ static void part_f(const std::string &dir)
                 i++;
             }
             sim_merge_free(m);
+        } else if (ok && (kind == "detent_button" || kind == "detent_detent")) {
+            Multi u;
+            static std::vector<std::string> ptext;
+            ptext.clear();
+            std::vector<Typed> ptyped;
+            for (ryml::ConstNodeRef q : v["positions"].children()) {
+                ptext.push_back(yval(q));
+                ptyped.push_back(ytyped(q));
+            }
+            static std::vector<const char *> pp;
+            pp.clear();
+            for (const std::string &t : ptext) {
+                pp.push_back(t.c_str());
+            }
+            static std::string pkinds;
+            static std::vector<long long> pints;
+            pkinds.clear();
+            pints.clear();
+            for (const Typed &q : ptyped) {
+                pkinds.push_back(q.k == 'I' ? 'I' : 'S');
+                pints.push_back(q.k == 'I' ? q.i : 0);
+            }
+            SimInput *s = u.input("s", SIM_IN_DETENT);
+            s->npositions = (int)pp.size();
+            s->positions = pp.data();
+            s->position_kinds = pkinds.c_str();
+            s->position_ints = pints.data();
+            SimInput *t1 = u.target(0, "t1", kind == "detent_button" ? SIM_IN_BUTTON : SIM_IN_DETENT);
+            if (kind == "detent_detent") {
+                t1->npositions = s->npositions;
+                t1->positions = s->positions;
+                t1->position_kinds = s->position_kinds;
+                t1->position_ints = s->position_ints;
+            }
+            SimBinding *x = u.bind(s, t1);
+            if (kind == "detent_button") {
+                Typed want = ytyped(v["binding"]["position"]);
+                int at = -1;
+                for (size_t q = 0; q < ptyped.size() && at < 0; q++) {
+                    at = ptyped[q] == want ? (int)q : -1;
+                }
+                x->position = at >= 0 ? s->positions[at] : nullptr;
+            }
+            SimMerge *m = u.build();
+            int i = 0;
+            for (ryml::ConstNodeRef r : v["readings"].children()) {
+                Typed rd = ytyped(r);
+                double val = lever_value(s, rd);
+                const SimMergeOut *o = step(m, { val }, "t1");
+                if (kind == "detent_button") {
+                    bool pressed = o && o->pressed;
+                    if (pressed != (yval(v["expect"]["pressed"][i]) == "true")) {
+                        ok = false;
+                        why += " reading " + yval(r) + (pressed ? " pressed" : " released");
+                    }
+                } else if (!lever_out_matches(o, ytyped(v["expect"]["values"][i]), &why)) {
+                    ok = false;
+                    not_built = not_built || !lever_out_built();
+                }
+                i++;
+            }
+            sim_merge_free(m);
+        } else if (ok && kind == "hat_button") {
+            Multi u;
+            SimInput *s = u.input("s", SIM_IN_HAT);
+            SimBinding *x = u.bind(s, u.target(0, "t1", SIM_IN_BUTTON));
+            static std::string dir;
+            dir = yval(v["binding"]["direction"]);
+            x->direction = dir.c_str();
+            SimMerge *m = u.build();
+            int i = 0;
+            for (ryml::ConstNodeRef r : v["readings"].children()) {
+                double bits = hat_value(ynum(r[0]), ynum(r[1]));
+                const SimMergeOut *o = step(m, { bits }, "t1");
+                bool pressed = o && o->pressed;
+                if (pressed != (yval(v["expect"]["pressed"][i]) == "true")) {
+                    ok = false;
+                    why += " reading [" + yval(r[0]) + ", " + yval(r[1]) + "]" + (pressed ? " pressed" : " released");
+                }
+                i++;
+            }
+            sim_merge_free(m);
         } else if (ok && kind == "round") {
             double r = sim_merge_round(ynum(v["value"]), ynum(v["target"]["rest"]));
             ok = r == ynum(v["rounded"]);
@@ -1180,6 +1461,10 @@ static void part_f(const std::string &dir)
             why = " unknown kind " + kind;
         }
         n++;
+        if (table) {
+            printf("VEC %s %s%s\n", id.c_str(), ok ? "AGREES" : not_built ? "NOT-BUILT" : "DISAGREES",
+                   ok ? "" : why.c_str());
+        }
         if (!ok) {
             bad++;
             expect("F: " + id + why, false);

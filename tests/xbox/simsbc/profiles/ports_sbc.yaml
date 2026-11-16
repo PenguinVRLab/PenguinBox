@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simsbc: the real Steel Battalion controller one to one (written for this test, not the app's).
+schema: sim-profile/1
+kind: ports
+id: sbc_real
+ports:
+  1:
+    target: steel_battalion
+    profile: sbc_all
+    devices:
+      - { device: steel_battalion_controller, port_path: "pci-0000:00:14.0-usb-0:2:1.0" }
+  2:
+    target: steel_battalion
+    profile: sbc_levers_only
+    devices:
+      - { device: steel_battalion_controller, port_path: "pci-0000:00:14.0-usb-0:2:1.0" }

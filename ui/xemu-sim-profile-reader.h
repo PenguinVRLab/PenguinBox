@@ -54,6 +54,8 @@ typedef struct SimInput {
     int npositions;
     const char *const *positions;
     bool stays_put;
+    const char *position_kinds;
+    const long long *position_ints;
 } SimInput;
 
 typedef enum SimPolicy {

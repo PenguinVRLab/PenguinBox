@@ -368,7 +368,8 @@ void MainMenuInputView::Draw()
                     ImGui::PushID(j);
                     const char *selectable_label = peripheral_type_names[j];
 
-                        if (ImGui::Selectable(selectable_label, is_selected)) {
+                        if (ImGui::Selectable(selectable_label, is_selected) &&
+                            !xemu_input_strict_refuse_xmu(active)) {
                             if (bound_state->peripherals[i] != NULL) {
                                 if (bound_state->peripheral_types[i] ==
                                     PERIPHERAL_XMU) {
@@ -450,6 +451,9 @@ void MainMenuInputView::Draw()
                     int port = active;
                     int slot = i;
                     ShowSaveFileDialog(img_file_filters, 2, nullptr, [port, slot](const char *new_path) {
+                        if (xemu_input_strict_refuse_xmu(port)) {
+                            return;
+                        }
                         if (create_fatx_image(new_path, DEFAULT_XMU_SIZE)) {
                             xemu_input_bind_xmu(port, slot, new_path, false);
                         } else {
@@ -465,6 +469,9 @@ void MainMenuInputView::Draw()
                 int slot = i;
                 FilePicker("Image", xmu->filename, img_file_filters, 2, false,
                            [port, slot](const char *path) {
+                               if (xemu_input_strict_refuse_xmu(port)) {
+                                   return;
+                               }
                                if (strlen(path) > 0) {
                                    xemu_input_bind_xmu(port, slot, path, false);
                                } else {
@@ -704,6 +711,146 @@ static int ConfiguredSurfaceScale()
     return s < 1 ? 1 : (s > 10 ? 10 : s);
 }
 
+#ifdef CONFIG_VULKAN
+#include "hw/xbox/nv2a/pgraph/vk/gpu_choice.h"
+
+static void DrawGpuChoice()
+{
+    static XemuGpuStatus st;
+    static bool ask;
+    static std::string pending_uuid, pending_name;
+
+    xemu_gpu_get_status(&st);
+    if (st.n <= 0) {
+        return;
+    }
+
+    GpuSelectChoice saved = {
+        g_config.display.gpu.uuid,
+        g_config.display.gpu.name,
+        g_config.display.vulkan.preferred_physical_device,
+    };
+    bool have_choice = (saved.uuid_hex && saved.uuid_hex[0]) ||
+                       (saved.name && saved.name[0]);
+    GpuSelectPick chosen = gpu_select_pick(st.dev, st.n, &saved, NULL);
+    GpuSelectChoice effective = gpu_select_choice_for(&saved, st.vr, NULL);
+    GpuSelectPick now = gpu_select_pick(st.dev, st.n, &effective, NULL);
+
+    int entry_dev[GPU_SELECT_MAX_DEVICES + 2];
+    int n_entries = 0, current = 0;
+    std::string items("Automatic (dedicated GPU first)");
+    items.push_back('\0');
+    entry_dev[n_entries++] = -1;
+    for (int i = 0; i < st.n && i < GPU_SELECT_MAX_DEVICES; i++) {
+        bool is_chosen = have_choice && !chosen.choice_missing &&
+                         chosen.wanted == i;
+        if (!st.dev[i].usable) {
+            continue;
+        }
+        if (st.dev[i].type == GPU_SELECT_TYPE_CPU && !is_chosen) {
+            continue;
+        }
+        char line[512];
+        gpu_select_describe(&st.dev[i], line, sizeof(line));
+        items += line;
+        items.push_back('\0');
+        if (is_chosen) {
+            current = n_entries;
+        }
+        entry_dev[n_entries++] = i;
+    }
+    if (have_choice && chosen.choice_missing) {
+        items += saved.name && saved.name[0] ? saved.name : "(no name saved)";
+        items += " (not found)";
+        items.push_back('\0');
+        current = n_entries;
+        entry_dev[n_entries++] = -2;
+    }
+
+    int sel = current;
+    if (ChevronCombo("GPU", &sel, items.c_str(),
+                     "The graphics card PenguinBox runs on. A change "
+                     "restarts PenguinBox") &&
+        sel != current && sel >= 0 && sel < n_entries &&
+        entry_dev[sel] != -2) {
+        pending_uuid.clear();
+        pending_name.clear();
+        if (entry_dev[sel] >= 0) {
+            const GpuSelectDevice *d = &st.dev[entry_dev[sel]];
+            if (d->has_uuid) {
+                char hex[GPU_SELECT_UUID_HEX_SIZE];
+                gpu_select_uuid_to_hex(d->uuid, hex);
+                pending_uuid = hex;
+            }
+            pending_name = d->name;
+        }
+        ask = true;
+    }
+
+    if (ask) {
+        ImGui::OpenPopup("GPU##gpu-restart");
+        ask = false;
+    }
+    if (ImGui::BeginPopupModal("GPU##gpu-restart", NULL,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("You have made changes that require a restart. Proceed?");
+        if (ImGui::Button("Proceed")) {
+            char err[256];
+            xemu_settings_set_string(&g_config.display.gpu.uuid,
+                                     pending_uuid.c_str());
+            xemu_settings_set_string(&g_config.display.gpu.name,
+                                     pending_name.c_str());
+            ImGui::CloseCurrentPopup();
+            fprintf(stderr, "gpu: menu: restarting PenguinBox for the GPU "
+                    "choice ('%s'). The restart line that follows names the "
+                    "system memory size: that is the shared restart path, "
+                    "and the memory size is not changing\n",
+                    pending_name.empty() ? "automatic" : pending_name.c_str());
+            xemu_machine_profile_restart(err, sizeof(err));
+            xemu_queue_error_message(err);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    const char *running =
+        g_config.display.renderer == CONFIG_DISPLAY_RENDERER_VULKAN &&
+        st.vulkan_known ? st.vulkan_name : st.gl_renderer;
+    if (running[0]) {
+        ImGui::Text("Running now: %s", running);
+    }
+    if (now.wanted != st.start.wanted) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1),
+                           "The GPU choice applies when PenguinBox restarts.");
+    }
+    if (st.vr || g_config.vr.enable || xemu_vr_active()) {
+        ImGui::Text("In VR the headset runtime picks the GPU");
+    }
+    for (int i = 0; i < st.n && i < GPU_SELECT_MAX_DEVICES; i++) {
+        if (!st.dev[i].usable) {
+            ImGui::Text("Not usable: %s (%s)", st.dev[i].name,
+                        st.dev[i].why_not);
+        }
+    }
+    if (st.notice_missing[0] || st.notice_gl[0] || st.notice_vr[0]) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
+        if (st.notice_vr[0]) {
+            ImGui::TextWrapped("%s", st.notice_vr);
+        }
+        if (st.notice_missing[0]) {
+            ImGui::TextWrapped("%s", st.notice_missing);
+        }
+        if (st.notice_gl[0]) {
+            ImGui::TextWrapped("%s", st.notice_gl);
+        }
+        ImGui::PopStyleColor();
+    }
+}
+#endif
+
 void MainMenuDisplayView::Draw()
 {
     SectionTitle("Renderer");
@@ -719,6 +866,9 @@ void MainMenuDisplayView::Draw()
         ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s",
                             nv2a_get_renderer_fallback_reason());
     }
+#ifdef CONFIG_VULKAN
+    DrawGpuChoice();
+#endif
     int rendering_scale = ConfiguredSurfaceScale() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"

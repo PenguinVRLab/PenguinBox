@@ -1,0 +1,12 @@
+schema: sim-profile/1
+kind: device
+id: wheel
+source: sdl_joystick
+template: wheel_v1
+inputs:
+  - { id: steering, kind: axis, min: -32768, rest: 0, max: .inf }
+  - { id: paddle_up, kind: button }
+  - { id: paddle_down, kind: button }
+  - { id: pov, kind: hat }
+outputs:
+  - { transport: sdl_haptic, effects: [constant, spring], gain: 0.35, clamp: 0.8, invert: false }

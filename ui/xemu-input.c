@@ -34,6 +34,7 @@
 #include "xemu-settings.h"
 #include "xemu-sbc-device.h"
 #include "xemu-sim-port.h"
+#include "xemu-sim-boot.h"
 #include "qom/object.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -268,6 +269,18 @@ static const int port_map[4] = { 3, 4, 1, 2 };
 static int sbc_passthrough_port = -1;
 static void xemu_input_sbc_passthrough_init(void);
 
+#define STRICT_MAX_DEFERRED 16
+static struct {
+    bool on;
+    ControllerState *had[4];
+    const char *had_driver[4];
+    const char *held_driver[4];
+    ControllerState *deferred[STRICT_MAX_DEFERRED];
+    int ndeferred;
+} strict;
+static bool strict_giving_back;
+static void xemu_input_hotplug_bind(ControllerState *new_con);
+
 void xemu_input_init(void)
 {
     if (g_config.input.background_input_capture) {
@@ -425,6 +438,8 @@ void xemu_input_init(void)
     QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
 
     xemu_input_sbc_passthrough_init();
+
+    xemu_sim_boot_input_ready();
 }
 
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start)
@@ -449,6 +464,9 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
                                    int peripheral_type,
                                    const char *peripheral_parameter)
 {
+    if (xemu_input_strict_refuse_xmu(player_index)) {
+        return;
+    }
     int *peripheral_type_ptr =
         peripheral_types_settings_map[player_index][peripheral_index];
     const char **peripheral_param_ptr =
@@ -497,6 +515,74 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
         xemu_input_bindings_reload_map(new_con);
 
+        if (strict.on) {
+            if (strict.ndeferred < STRICT_MAX_DEFERRED) {
+                strict.deferred[strict.ndeferred++] = new_con;
+            }
+            fprintf(stderr, "strict-input: '%s' plugged in: not connected (the Sim Configurator setup is in "
+                    "force)\n", new_con->name);
+            return;
+        }
+        xemu_input_hotplug_bind(new_con);
+    } else if (event->type == SDL_EVENT_GAMEPAD_REMOVED) {
+        DPRINTF("Controller Removed: %d\n", event->gdevice.which);
+        int handled = 0;
+        ControllerState *iter, *next;
+        QTAILQ_FOREACH_SAFE(iter, &available_controllers, entry, next) {
+            if (iter->type != INPUT_DEVICE_SDL_GAMEPAD) continue;
+
+            if (iter->sdl_joystick_id == event->gdevice.which) {
+                DPRINTF("Device removed: %s\n", iter->name);
+
+                if (iter->bound >= 0) {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Port %d disconnected", iter->bound+1);
+                    xemu_queue_notification(buf);
+
+                    xemu_input_bind(iter->bound, NULL, 0);
+                }
+
+                QTAILQ_REMOVE(&available_controllers, iter, entry);
+                if (strict.on) {
+                    for (int i = 0; i < 4; i++) {
+                        if (strict.had[i] == iter) {
+                            strict.had[i] = NULL;
+                        }
+                    }
+                    for (int i = 0; i < strict.ndeferred; i++) {
+                        if (strict.deferred[i] == iter) {
+                            strict.deferred[i] = NULL;
+                        }
+                    }
+                }
+
+                if (iter->sdl_gamepad) {
+                    SDL_CloseGamepad(iter->sdl_gamepad);
+                }
+
+                for (int i = 0; i < 2; i++) {
+                    if (iter->peripherals[i])
+                        g_free(iter->peripherals[i]);
+                }
+                free(iter);
+
+                handled = 1;
+                break;
+            }
+        }
+        if (!handled) {
+            DPRINTF("Could not find handle for joystick instance\n");
+        }
+    } else if (event->type == SDL_EVENT_GAMEPAD_REMAPPED) {
+        DPRINTF("Controller Remapped: %d\n", event->gdevice.which);
+    }
+}
+
+static void xemu_input_hotplug_bind(ControllerState *new_con)
+{
+    {
+
+
         int port = 0;
         bool did_bind = false;
         while (!did_bind) {
@@ -528,45 +614,6 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
             xemu_queue_notification(buf);
             xemu_input_rebind_xmu(port);
         }
-    } else if (event->type == SDL_EVENT_GAMEPAD_REMOVED) {
-        DPRINTF("Controller Removed: %d\n", event->gdevice.which);
-        int handled = 0;
-        ControllerState *iter, *next;
-        QTAILQ_FOREACH_SAFE(iter, &available_controllers, entry, next) {
-            if (iter->type != INPUT_DEVICE_SDL_GAMEPAD) continue;
-
-            if (iter->sdl_joystick_id == event->gdevice.which) {
-                DPRINTF("Device removed: %s\n", iter->name);
-
-                if (iter->bound >= 0) {
-                    char buf[128];
-                    snprintf(buf, sizeof(buf), "Port %d disconnected", iter->bound+1);
-                    xemu_queue_notification(buf);
-
-                    xemu_input_bind(iter->bound, NULL, 0);
-                }
-
-                QTAILQ_REMOVE(&available_controllers, iter, entry);
-
-                if (iter->sdl_gamepad) {
-                    SDL_CloseGamepad(iter->sdl_gamepad);
-                }
-
-                for (int i = 0; i < 2; i++) {
-                    if (iter->peripherals[i])
-                        g_free(iter->peripherals[i]);
-                }
-                free(iter);
-
-                handled = 1;
-                break;
-            }
-        }
-        if (!handled) {
-            DPRINTF("Could not find handle for joystick instance\n");
-        }
-    } else if (event->type == SDL_EVENT_GAMEPAD_REMAPPED) {
-        DPRINTF("Controller Remapped: %d\n", event->gdevice.which);
     }
 }
 
@@ -1011,6 +1058,17 @@ void xemu_input_bind(int index, ControllerState *state, int live_apply_flag)
         xemu_queue_notification(buf);
         return;
     }
+    if (strict.on && live_apply_flag) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Port %d is held by the Sim Configurator setup of this game: %s. Eject the "
+                 "disc to get your own controllers back", index + 1,
+                 state ? "the change is not made" : "it stays as it is");
+        xemu_queue_notification(buf);
+        fprintf(stderr, "strict-input: refused a binding of port %d to '%s'\n", index + 1,
+                state ? state->name : "nothing");
+        bound_drivers[index] = strict.held_driver[index];
+        return;
+    }
 
     if (bound_controllers[index]) {
         assert(bound_controllers[index]->device != NULL);
@@ -1103,6 +1161,93 @@ void xemu_input_bind(int index, ControllerState *state, int live_apply_flag)
 
         state->device = hasInternalHub ? usbhub_dev : dev;
     }
+    if (strict.on) {
+        strict.held_driver[index] = bound_drivers[index];
+    }
+}
+
+static bool strict_still_available(ControllerState *s)
+{
+    ControllerState *iter;
+    QTAILQ_FOREACH(iter, &available_controllers, entry) {
+        if (iter == s) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool xemu_input_strict_active(void)
+{
+    return strict.on;
+}
+
+bool xemu_input_strict_refuse_xmu(int index)
+{
+    if (!strict.on) {
+        return false;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf), "Port %d is held by the Sim Configurator setup of this game: the change is not made. "
+             "Eject the disc to get your own controllers back", index + 1);
+    xemu_queue_notification(buf);
+    fprintf(stderr, "strict-input: refused a memory-unit change on port %d\n", index + 1);
+    return true;
+}
+
+void xemu_input_strict_begin(void)
+{
+    if (strict.on) {
+        xemu_input_strict_end();
+    }
+    memset(&strict, 0, sizeof(strict));
+    strict.on = true;
+    for (int i = 0; i < 4; i++) {
+        strict.had[i] = bound_controllers[i];
+        strict.had_driver[i] = bound_drivers[i];
+        strict.held_driver[i] = bound_drivers[i];
+        if (bound_controllers[i]) {
+            xemu_input_bind(i, NULL, 0);
+        }
+    }
+    fprintf(stderr, "strict-input: on: the four ports are held for the Sim Configurator setup (they held %s, %s, "
+            "%s, %s)\n", strict.had[0] ? strict.had[0]->name : "nothing", strict.had[1] ? strict.had[1]->name :
+            "nothing", strict.had[2] ? strict.had[2]->name : "nothing", strict.had[3] ? strict.had[3]->name :
+            "nothing");
+}
+
+void xemu_input_strict_end(void)
+{
+    if (!strict.on) {
+        return;
+    }
+    xemu_sim_port_detach_all();
+    strict.on = false;
+    strict_giving_back = true;
+    for (int i = 0; i < 4; i++) {
+        if (bound_controllers[i]) {
+            xemu_input_bind(i, NULL, 0);
+        }
+        bound_drivers[i] = strict.had_driver[i];
+        ControllerState *c = strict.had[i];
+        if (c && strict_still_available(c) && c->bound < 0) {
+            xemu_input_bind(i, c, 0);
+            xemu_input_rebind_xmu(i);
+        }
+    }
+    for (int i = 0; i < strict.ndeferred; i++) {
+        ControllerState *c = strict.deferred[i];
+        if (c && strict_still_available(c) && c->bound < 0) {
+            xemu_input_hotplug_bind(c);
+        }
+    }
+    strict_giving_back = false;
+    fprintf(stderr, "strict-input: off: every port given back (%s, %s, %s, %s)\n",
+            bound_controllers[0] ? bound_controllers[0]->name : "nothing",
+            bound_controllers[1] ? bound_controllers[1]->name : "nothing",
+            bound_controllers[2] ? bound_controllers[2]->name : "nothing",
+            bound_controllers[3] ? bound_controllers[3]->name : "nothing");
+    memset(&strict, 0, sizeof(strict));
 }
 
 bool xemu_input_bind_xmu(int player_index, int expansion_slot_index,
@@ -1110,6 +1255,9 @@ bool xemu_input_bind_xmu(int player_index, int expansion_slot_index,
 {
     assert(player_index >= 0 && player_index < 4);
     assert(expansion_slot_index >= 0 && expansion_slot_index < 2);
+    if (!is_rebind && xemu_input_strict_refuse_xmu(player_index)) {
+        return false;
+    }
 
     bool hasInternalHub =
         strcmp(bound_drivers[player_index], DRIVER_STEEL_BATTALION) != 0;
@@ -1170,8 +1318,23 @@ bool xemu_input_bind_xmu(int player_index, int expansion_slot_index,
     QemuOpts *drvopts =
         qemu_opts_from_qdict(qemu_find_opts("drive"), qdict1, &error_abort);
 
-    DriveInfo *dinfo = drive_new(drvopts, 0, &error_abort);
-    assert(dinfo);
+    Error *drive_err = NULL;
+    DriveInfo *dinfo = drive_new(drvopts, 0, strict_giving_back ? &drive_err : &error_abort);
+    if (!dinfo) {
+        char *msg = g_strdup_printf("The memory unit %s could not be put back on port %d%c (%s): it is left out",
+                                    filename, player_index + 1, 'A' + expansion_slot_index,
+                                    error_get_pretty(drive_err));
+        fprintf(stderr, "strict-input: %s\n", msg);
+        xemu_queue_error_message(msg);
+        g_free(msg);
+        error_free(drive_err);
+        qemu_opts_del(drvopts);
+        qobject_unref(qdict1);
+        g_free(tmp);
+        g_free((void *)xmu->filename);
+        xmu->filename = NULL;
+        return false;
+    }
 
     QDict *qdict2 = qdict_new();
 
@@ -1228,6 +1391,9 @@ void xemu_input_unbind_xmu(int player_index, int expansion_slot_index)
 
 void xemu_input_rebind_xmu(int port)
 {
+    if (strict.on) {
+        return;
+    }
     bool hasInternalHub =
         strcmp(bound_drivers[port], DRIVER_STEEL_BATTALION) != 0;
     if (!hasInternalHub)

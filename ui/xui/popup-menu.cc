@@ -347,11 +347,19 @@ public:
 
 struct SimBoot {
     bool waiting = false, stopped_vm = false, released_sbc = false, ask = false;
+    bool applied = false;
+    bool failed = false;
     std::string label, path, why;
     uint32_t title_id = 0;
     SimHandoffOutcome asked = SIM_HANDOFF_CRASH;
 };
 static SimBoot g_sim_boot;
+
+static void PlainLoadDisc(const std::string &path)
+{
+    xemu_sim_boot_end("another game is booted");
+    ActionLoadDiscFile(path.c_str());
+}
 
 static void SimBootRestore(bool boot)
 {
@@ -359,8 +367,11 @@ static void SimBootRestore(bool boot)
     if (b.released_sbc) {
         sbc_device_init();
     }
-    if (boot) {
+    if (boot && b.applied) {
         ActionLoadDiscFile(b.path.c_str());
+        xemu_sim_boot_disc_loaded(b.path.c_str());
+    } else if (boot) {
+        PlainLoadDisc(b.path);
     }
     if (b.stopped_vm && !runstate_is_running()) {
         vm_start();
@@ -389,6 +400,13 @@ static bool SimBootBegin(const std::string &label, const std::string &path, uint
     }
     SimHandoffResult r;
     if (!xemu_sim_handoff_start(title_id, name && *name ? name : label.c_str(), g_config.sim.configurator_command, &r)) {
+        if (r.outcome == SIM_HANDOFF_NOT_FOUND) {
+            fprintf(stderr, "sim-boot: " SIM_BOOT_NOT_INSTALLED " (%s): %s is not booted\n", r.why, label.c_str());
+            b.ask = true;
+            b.asked = SIM_HANDOFF_NOT_FOUND;
+            b.why = r.why;
+            return true;
+        }
         std::string msg = "Sim Configurator: " + std::string(r.why);
         xemu_queue_notification(msg.c_str());
         SimBootRestore(false);
@@ -401,6 +419,15 @@ static bool SimBootBegin(const std::string &label, const std::string &path, uint
 void SimBootDraw(void)
 {
     SimBoot &b = g_sim_boot;
+    xemu_sim_boot_poll();
+    char nl[160], nw[320];
+    if (!b.waiting && !b.ask && xemu_sim_boot_take_not_installed(nl, sizeof(nl), nw, sizeof(nw))) {
+        b = SimBoot();
+        b.label = nl;
+        b.why = nw;
+        b.ask = true;
+        b.asked = SIM_HANDOFF_NOT_FOUND;
+    }
     if (!b.waiting && !b.ask) {
         return;
     }
@@ -411,15 +438,27 @@ void SimBootDraw(void)
             switch (r.outcome) {
             case SIM_HANDOFF_SAVED:
             case SIM_HANDOFF_UNCHANGED: {
-                std::string msg = b.label + ": " + r.why + " (the profile is not applied yet: booting as usual)";
+                char why[768] = "";
+                fprintf(stderr, "sim-boot: %s: %s; the ports document '%s'\n", b.label.c_str(), r.why, r.ports);
+                if (!sim_boot_preflight_refuses(r.preflight, why, sizeof(why)) &&
+                    xemu_sim_boot_prepare(r.ports, why, sizeof(why)) && xemu_sim_boot_apply(why, sizeof(why))) {
+                    b.applied = true;
+                    SimBootRestore(true);
+                    return;
+                }
+                std::string msg = b.label + " is not booted: " + why;
                 xemu_queue_notification(msg.c_str());
-                SimBootRestore(true);
-                return;
+                b.ask = true;
+                b.failed = true;
+                b.asked = r.outcome;
+                b.why = why;
+                break;
             }
             case SIM_HANDOFF_CANCEL_BOOT:
                 xemu_queue_notification("Boot cancelled in the Sim Configurator");
                 SimBootRestore(false);
                 return;
+            case SIM_HANDOFF_NOT_FOUND:
             case SIM_HANDOFF_CRASH:
             case SIM_HANDOFF_BUSY:
                 b.ask = true;
@@ -451,6 +490,37 @@ void SimBootDraw(void)
             xemu_sim_handoff_cancel();
         }
     } else {
+        if (b.asked == SIM_HANDOFF_NOT_FOUND) {
+            ImGui::Text(SIM_BOOT_NOT_INSTALLED);
+            ImGui::TextDisabled("Install the Sim Configurator, then boot %s again. (%s)", b.label.c_str(),
+                                b.why.c_str());
+            ImGui::Spacing();
+            if (ImGui::Button("OK")) {
+                SimBootRestore(false);
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::End();
+            return;
+        }
+        if (b.failed) {
+            ImGui::Text("PenguinBox cannot apply the Sim Configurator setup for %s, so it is not booted.",
+                        b.label.c_str());
+            ImGui::TextDisabled("%s", b.why.c_str());
+            ImGui::Spacing();
+            if (ImGui::Button("Open the Sim Configurator again")) {
+                SimBoot keep = b;
+                SimBootRestore(false);
+                SimBootBegin(keep.label, keep.path, keep.title_id, keep.label.c_str());
+            } else {
+                ImGui::SameLine();
+                if (ImGui::Button("Don't boot")) {
+                    SimBootRestore(false);
+                }
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::End();
+            return;
+        }
         if (b.asked == SIM_HANDOFF_BUSY) {
             ImGui::Text("The Sim Configurator is already open.");
             ImGui::TextDisabled("Close the Sim Configurator window first, then boot %s again.", b.label.c_str());
@@ -494,24 +564,23 @@ void SimBootDraw(void)
 
 static void GameBoot(const std::string &label, const std::string &path)
 {
+    if (g_sim_boot.waiting || g_sim_boot.ask) {
+        xemu_queue_notification("A Sim Configurator boot is in progress: answer its window first");
+        fprintf(stderr, "sim-boot: a Boot of %s refused: a Sim Configurator boot is in progress\n", label.c_str());
+        return;
+    }
     XemuDiscXbeInfo info;
     char err[160], tid[9];
     if (xemu_disc_read_xbe_info(path.c_str(), &info, err, sizeof(err)) == 0) {
         xemu_disc_title_id_str(info.title_id, tid);
         if (xemu_settings_sim_always_open(tid)) {
-            if (!xemu_sim_boot_live()) {
-                char *msg = xemu_sim_boot_refusal(label.c_str());
-                xemu_queue_notification(msg);
-                g_free(msg);
-                return;
-            }
             if (!SimBootBegin(label, path, info.title_id, info.title_name)) {
-                ActionLoadDiscFile(path.c_str());
+                PlainLoadDisc(path);
             }
             return;
         }
     }
-    ActionLoadDiscFile(path.c_str());
+    PlainLoadDisc(path);
 }
 
 static void MenuNote(const std::string &text)
@@ -578,10 +647,7 @@ public:
             pop = true;
         }
         ImGui::EndDisabled();
-        if (!live) {
-            MenuNote("not available yet: PenguinBox cannot apply a Sim Configurator setup (the merge layer is not "
-                     "built); a game with \"Always open in Sim Configurator\" set is not booted until it can");
-        } else if (m_have_title && !m_have_app) {
+        if (m_have_title && !m_have_app) {
             MenuNote(m_app_why);
         }
 

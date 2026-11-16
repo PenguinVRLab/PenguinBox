@@ -500,6 +500,25 @@ void check_flow_depth(const std::string &text)
     }
 }
 
+struct MergeKeyRefused : Refused {
+    using Refused::Refused;
+};
+
+void check_merge_key(const ryml::Tree &t)
+{
+    std::vector<ryml::id_type> stack = { t.root_id() };
+    while (!stack.empty()) {
+        ryml::id_type n = stack.back();
+        stack.pop_back();
+        if (t.has_key(n) && !t.is_key_quoted(n) && t.key(n) == "<<") {
+            throw MergeKeyRefused("the YAML merge key << is not read: write the keys out");
+        }
+        for (ryml::id_type c = t.first_child(n); c != ryml::NONE; c = t.next_sibling(c)) {
+            stack.push_back(c);
+        }
+    }
+}
+
 Val parse_file(const std::string &path, const std::string &text)
 {
     check_flow_depth(text);
@@ -514,6 +533,7 @@ Val parse_file(const std::string &path, const std::string &text)
     ryml::Tree tree(cb);
     ryml::parse_in_arena(&parser, ryml::to_csubstr(path), ryml::csubstr(text.data(), text.size()), &tree);
     check_tree_bounds(tree);
+    check_merge_key(tree);
     tree.resolve();
     ryml::ConstNodeRef root = tree.crootref();
     if (root.is_stream()) {
@@ -611,6 +631,25 @@ void check_range(Fails &f, const std::string &path, const SimRange &r)
     }
 }
 
+bool range_numbers(Fails &f, const std::string &path, const Val &m)
+{
+    bool ok = true;
+    for (const char *k : { "min", "rest", "max" }) {
+        const Val *x = m.get(k);
+        if (!x) {
+            continue;
+        }
+        if (!x->is_num()) {
+            f.err("RANGE_NOT_NUMBER", path + "." + k, std::string(k) + " is a number, got '" + x->s + "'");
+            ok = false;
+        } else if (!std::isfinite(x->num())) {
+            f.err("RANGE_NOT_FINITE", path + "." + k, std::string(k) + " is a finite number, got '" + x->s + "'");
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 bool bipolar(const SimRange &r)
 {
     double lo = std::min(r.min, r.max), hi = std::max(r.min, r.max);
@@ -622,7 +661,27 @@ std::string idx(const char *key, size_t i)
     return std::string(key) + "[" + std::to_string(i) + "]";
 }
 
-void check_signal(Fails &f, const std::string &path, const Val &sig, bool keyboard, bool mouse)
+void check_code_range(Fails &f, const std::string &path, const Val &sig, const std::string &kind, bool evdev)
+{
+    long long table = kind == "axis" ? 0x3f : kind == "hat" ? 0x3f - 1 : kind == "button" ? 0x2ff :
+                      kind == "relative" ? 0x0f : -1;
+    if (const Val *code = sig.get("code")) {
+        if (code->is_int() && evdev && table >= 0 && (code->big || code->i < 0 || code->i > table)) {
+            f.err("CODE_RANGE", path + ".code", "code " + code->s + " is outside the Linux evdev table for a " + kind +
+                  " input: 0.." + std::to_string(table));
+        } else if (code->is_int() && (code->big || code->i > INT_MAX)) {
+            f.err("CODE_RANGE", path + ".code", "code " + code->s + " does not fit this core's code (0.." +
+                  std::to_string(INT_MAX) + "): it is refused, never narrowed");
+        }
+    }
+    const Val *sc = sig.get("scancode");
+    if (evdev && sc && sc->is_int() && (sc->big || sc->i < 0 || sc->i > 0x2ff)) {
+        f.err("CODE_RANGE", path + ".scancode", "scancode " + sc->s + " is outside the Linux evdev table for a key: "
+                                                "0.." + std::to_string(0x2ff));
+    }
+}
+
+void check_signal(Fails &f, const std::string &path, const Val &sig, bool keyboard, bool mouse, bool evdev)
 {
     const Val *k = sig.get("kind");
     if (!k || !k->is_str() || !one_of(k->s, KINDS)) {
@@ -630,6 +689,7 @@ void check_signal(Fails &f, const std::string &path, const Val &sig, bool keyboa
         return;
     }
     const std::string &kind = k->s;
+    check_code_range(f, path, sig, kind, evdev);
     if (mouse) {
         if (kind != "button" && kind != "relative") {
             f.err("MOUSE_INPUT_KIND", path, "a mouse input is a button or a relative axis");
@@ -654,7 +714,8 @@ void check_signal(Fails &f, const std::string &path, const Val &sig, bool keyboa
     }
     if (kind == "axis") {
         SimRange r;
-        if (!range_of(sig, &r)) {
+        if (!range_numbers(f, path, sig)) {
+        } else if (!range_of(sig, &r)) {
             f.err("DESCRIPTOR_INCOMPLETE", path, "an axis needs min, rest and max");
         } else {
             check_range(f, path, r);
@@ -679,7 +740,8 @@ void check_signal(Fails &f, const std::string &path, const Val &sig, bool keyboa
         }
         if (const Val *an = sig.get("analog")) {
             SimRange r;
-            if (!range_of(*an, &r)) {
+            if (!range_numbers(f, path + ".analog", *an)) {
+            } else if (!range_of(*an, &r)) {
                 f.err("DESCRIPTOR_INCOMPLETE", path + ".analog", "analog needs min, rest and max");
             } else {
                 check_range(f, path + ".analog", r);
@@ -691,8 +753,19 @@ void check_signal(Fails &f, const std::string &path, const Val &sig, bool keyboa
         }
     } else if (kind == "detent") {
         const Val *pos = sig.get("positions");
-        if (pos && pos->t != Val::NUL && (pos->t != Val::SEQ || pos->seq.empty())) {
-            f.err("DETENT_POSITIONS", path, "positions, when given, is a non-empty list");
+        if (!pos || pos->t == Val::NUL) {
+            f.err("DETENT_POSITIONS_REQUIRED", path, "a detent (lever) declares its positions: [...], the values its "
+                                                     "reading takes");
+        } else if (pos->t != Val::SEQ || pos->seq.empty()) {
+            f.err("DETENT_POSITIONS", path, "positions is a non-empty list");
+        } else {
+            for (const Val &q : pos->seq) {
+                if (!(q.is_int() || q.is_str())) {
+                    f.err("DETENT_POSITIONS", path, "each position is an integer or text, never a bool, a float or a "
+                                                    "list (positions compare by type and value)");
+                    break;
+                }
+            }
         }
     }
 }
@@ -705,9 +778,14 @@ void unique_ids(Fails &f, const Val *items, const char *key)
     }
     for (size_t i = 0; i < items->seq.size(); i++) {
         const Val *id = items->seq[i].get("id");
-        if (!id || !(id->is_str() || id->is_int()) || (id->is_str() && id->s.empty())) {
+        if (!id || id->t == Val::NUL || (id->is_str() && id->s.empty())) {
             f.err("MISSING_ID", idx(key, i), "every entry needs an id");
-        } else if (!seen.insert(id->s).second) {
+            continue;
+        }
+        if (!id->is_str()) {
+            f.err("ID_TYPE", idx(key, i) + ".id", "an id is text; '" + id->s + "' is not (quote it)");
+        }
+        if (!seen.insert(id->s).second) {
             f.err("DUPLICATE_ID", idx(key, i), "id '" + id->s + "' appears twice");
         }
     }
@@ -813,7 +891,9 @@ void check_document(Fails &f, const Doc &d)
                 for (size_t i = 0; i < items->seq.size(); i++) {
                     if (items->seq[i].t == Val::MAP) {
                         check_signal(f, idx(key, i), items->seq[i], source == "keyboard",
-                                     d.kind == "device" && source == "mouse");
+                                     d.kind == "device" && source == "mouse",
+                                     d.kind == "device" && (source == "sdl_joystick" || source == "keyboard" ||
+                                                            source == "mouse"));
                         const Val *rtr = items->seq[i].get("returns_to_rest");
                         const Val *knd = items->seq[i].get("kind");
                         if (d.kind == "target" && rtr &&
@@ -834,11 +914,15 @@ void check_document(Fails &f, const Doc &d)
         if (!dev || !dev->is_str()) {
             f.err("MISSING_REF", "device", "calibration names the device profile it measures");
         }
-        if (const Val *in = v.get("inputs")) {
+        const Val *in = v.get("inputs");
+        if (in && in->t != Val::NUL && in->t != Val::MAP) {
+            f.err("CALIBRATION_SHAPE", "inputs", "a calibration's inputs is a mapping {<input id>: {min, rest, max}}");
+        } else if (in) {
             for (const auto &kv : in->map) {
                 SimRange r;
                 std::string p = "inputs." + kv.first.s;
-                if (!range_of(kv.second, &r)) {
+                if (!range_numbers(f, p, kv.second)) {
+                } else if (!range_of(kv.second, &r)) {
                     f.err("DESCRIPTOR_INCOMPLETE", p, "measured min, rest and max");
                 } else {
                     check_range(f, p, r);
@@ -879,6 +963,10 @@ void check_document(Fails &f, const Doc &d)
             if (pol && !(pol->is_str() && one_of(pol->s, POLICIES))) {
                 f.err("POLICY_UNKNOWN", p, "policy must be one of half_positive, half_negative, absolute, "
                                            "full_range, split");
+            }
+            if (e.has("response") && e.get("response")->t != Val::MAP) {
+                f.err("RESPONSE_SHAPE", p + ".response", "response, when given, is a mapping (window, deadzone, curve, "
+                                                         "saturation, invert, mode)");
             }
             if (const Val *resp = e.get("response")) {
                 const Val *w = resp->get("window");
@@ -1060,6 +1148,8 @@ struct DevC {
     std::vector<SimInput> in;
     std::deque<std::string> strs;
     std::deque<std::vector<const char *>> pos;
+    std::deque<std::string> pos_kinds;
+    std::deque<std::vector<long long>> pos_ints;
     SimSourceKind source = SIM_SRC_HID_USB;
     bool has_match = false;
     uint16_t vid = 0, pid = 0;
@@ -1167,7 +1257,8 @@ void compile_inputs(DevC &c, const char *key)
         SimInput x{};
         x.id = keep(c.strs, sig.get("id")->s);
         x.kind = input_kind(sig.get("kind")->s);
-        x.code = is_code(sig.get("code")) ? (int)sig.get("code")->i : -1;
+        const Val *code = sig.get("code");
+        x.code = is_code(code) && !code->big && code->i <= INT_MAX ? (int)code->i : -1;
         x.has_range = range_of(sig, &x.range);
         x.bipolar = x.has_range && bipolar(x.range);
         const Val *inv = sig.get("invert");
@@ -1185,11 +1276,17 @@ void compile_inputs(DevC &c, const char *key)
         const Val *pos = sig.get("positions");
         if (pos && pos->t == Val::SEQ) {
             c.pos.emplace_back();
+            c.pos_kinds.emplace_back();
+            c.pos_ints.emplace_back();
             for (const Val &p : pos->seq) {
                 c.pos.back().push_back(keep(c.strs, p.s));
+                c.pos_kinds.back().push_back(p.is_int() ? 'I' : 'S');
+                c.pos_ints.back().push_back(p.is_int() ? p.i : 0);
             }
             x.npositions = (int)c.pos.back().size();
             x.positions = c.pos.back().data();
+            x.position_kinds = c.pos_kinds.back().c_str();
+            x.position_ints = c.pos_ints.back().data();
         }
         c.in.push_back(x);
         c.ids.push_back(sig.get("id"));
@@ -1214,10 +1311,35 @@ Sig sig_of(const SimInput &x)
     return { x.kind, -1, false };
 }
 
+bool same_position(const Val &a, const Val &b)
+{
+    if (a.t != b.t) {
+        return false;
+    }
+    switch (a.t) {
+    case Val::INT: return a.i == b.i && a.big == b.big && (!a.big || a.d == b.d);
+    case Val::STR: return a.s == b.s;
+    default: return py_equal(a, b);
+    }
+}
+
+bool same_positions(const Val *a, const Val *b)
+{
+    if (!a || !b || a->t != Val::SEQ || b->t != Val::SEQ || a->seq.size() != b->seq.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a->seq.size(); i++) {
+        if (!same_position(a->seq[i], b->seq[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int position_index(const Val &want, const Val *positions)
 {
     for (size_t i = 0; positions && i < positions->seq.size(); i++) {
-        if (py_equal(want, positions->seq[i])) {
+        if (same_position(want, positions->seq[i])) {
             return (int)i;
         }
     }
@@ -1225,7 +1347,7 @@ int position_index(const Val &want, const Val *positions)
 }
 
 void check_pair(Fails &f, const std::string &p, const Val &e, const SimInput &s, const SimInput &t,
-                const Val *src_positions)
+                const Val *src_positions, const Val *tgt_positions)
 {
 #ifdef SIM_PROFILE_READER_DRILL_ACCEPT_PAIRS
     return;
@@ -1332,8 +1454,16 @@ void check_pair(Fails &f, const std::string &p, const Val &e, const SimInput &s,
         const Val *pos = e.get("position");
         if (!pos) {
             f.err("DETENT_POSITION", p, "detent -> button names the position that becomes the press");
-        } else if (s.npositions > 0 && position_index(*pos, src_positions) < 0) {
-            f.err("DETENT_POSITION", p, "position '" + pos->s + "' is not one of the source's positions");
+        } else if (position_index(*pos, src_positions) < 0) {
+            f.err("DETENT_POSITION", p, "position '" + pos->s + "' is not one of the source's positions (by type and "
+                                        "value: 1 is not \"1\")");
+        }
+        return;
+    }
+    if (src.kind == SIM_IN_DETENT && tgt.kind == SIM_IN_DETENT) {
+        if (!same_positions(src_positions, tgt_positions)) {
+            f.err("DETENT_POSITIONS_DIFFER", p, "detent -> detent passes the reading straight through, so both levers "
+                                                "have the same positions in the same order");
         }
         return;
     }
@@ -1426,6 +1556,10 @@ bool compile_bindings(SimProfileSet &set, const Doc &d, Fails &f, bool report_on
                 }
             }
         }
+        if (policy_of(e.get("policy")) == SIM_POLICY_SPLIT && src->kind == SIM_IN_RELATIVE && !integrate) {
+            f.err("RELATIVE_NEEDS_INTEGRATE", p, "a relative source reports motion: split it only through response: "
+                                                 "{mode: integrate, ...}");
+        }
         std::vector<const Val *> names;
         if (const Val *ts = e.get("targets")) {
             for (const Val &n : ts->seq) {
@@ -1444,7 +1578,7 @@ bool compile_bindings(SimProfileSet &set, const Doc &d, Fails &f, bool report_on
             }
             (t1 ? t2 : t1) = t;
             if (policy_of(e.get("policy")) != SIM_POLICY_SPLIT) {
-                check_pair(f, p, e, *src, *t, di->second.positions_of(src));
+                check_pair(f, p, e, *src, *t, di->second.positions_of(src), ti->second.positions_of(t));
             }
         }
         if (!t1) {
@@ -1817,6 +1951,9 @@ void add_file(SimProfileSet &set, const std::string &path)
     Val v;
     try {
         v = parse_file(path, text);
+    } catch (const MergeKeyRefused &e) {
+        set.refuse({ "MERGE_KEY", path, e.what() });
+        return;
     } catch (const std::exception &e) {
         std::string why = e.what();
         set.refuse({ "PARSE_ERROR", path, why.substr(0, why.find('\n')) });
@@ -1853,6 +1990,56 @@ void add_file(SimProfileSet &set, const std::string &path)
         return;
     }
     set.filed[d.kind][d.id] = &d;
+}
+
+void check_calibration(const SimProfileSet &set, Fails &f, const Doc &cal, const Val &inp, const Val &meas,
+                       const SimInput &x)
+{
+    SimRange m, decl;
+    if (!range_of(meas, &m)) {
+        return;
+    }
+    bool has_decl = x.kind == SIM_IN_AXIS ? x.has_range : x.analog;
+    decl = x.kind == SIM_IN_AXIS ? x.range : x.analog_range;
+    if (has_decl) {
+        double lo = std::min(decl.min, decl.max), hi = std::max(decl.min, decl.max);
+        std::string outside;
+        for (auto kv : { std::make_pair("min", m.min), std::make_pair("rest", m.rest), std::make_pair("max", m.max) }) {
+            if (!(lo <= kv.second && kv.second <= hi)) {
+                outside += std::string(outside.empty() ? "" : ", ") + kv.first;
+            }
+        }
+        if (!outside.empty()) {
+            f.err("CALIBRATION_OUT_OF_RANGE", "inputs." + inp.s, "its " + outside + " lie outside the device's declared "
+                  "range: it was recorded against a different range for this device and must be recorded again");
+        }
+        if (bipolar(m) != bipolar(decl)) {
+            std::set<std::string> seen;
+            for (const Doc &b : set.docs) {
+                if (b.kind != "bindings" || b.id.empty() || !seen.insert(b.id).second) {
+                    continue;
+                }
+                const Val *bd = b.v.get("device"), *cd = cal.v.get("device");
+                if (!bd || !cd || !py_equal(*bd, *cd)) {
+                    continue;
+                }
+                std::vector<Val> entries;
+                bind_entries(b.v.get("bind"), &entries);
+                for (size_t i = 0; i < entries.size(); i++) {
+                    const Val &e = entries[i];
+                    const Val *src = e.get("source"), *pol = e.get("policy");
+                    if (e.t != Val::MAP || !src || !py_equal(*src, inp) ||
+                        (pol && pol->is_str() && one_of(pol->s, POLICIES))) {
+                        continue;
+                    }
+                    f.err("CALIBRATION_POLARITY", "inputs." + inp.s, "this calibration makes '" + inp.s + "' " +
+                          (bipolar(m) ? "bipolar" : "unipolar") + " where its device declares it " +
+                          (bipolar(decl) ? "bipolar" : "unipolar") + "; bindings:" + b.id + " " + idx("bind", i) +
+                          " reads it with no policy. Measure the rest at the stop, or declare a policy");
+                }
+            }
+        }
+    }
 }
 
 void compile(SimProfileSet &set)
@@ -1907,8 +2094,11 @@ void compile(SimProfileSet &set)
             f.err("UNRESOLVED_REF", "device", "no device '" + dev + "' (absent, or refused)");
         } else if (const Val *in = d.v.get("inputs")) {
             for (const auto &kv : in->map) {
-                if (!dc->second.find(kv.first)) {
+                const SimInput *x = dc->second.find(kv.first);
+                if (!x) {
                     f.err("UNKNOWN_SOURCE", "inputs." + kv.first.s, "not an input of device '" + dev + "'");
+                } else {
+                    check_calibration(set, f, d, kv.first, kv.second, *x);
                 }
             }
         }
