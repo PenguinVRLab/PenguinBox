@@ -20,6 +20,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "hw/display/vga_int.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/util.h"
@@ -341,8 +342,17 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
 static void gl_fence(void)
 {
     GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    int result = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT,
-                                         (GLuint64)(5000000000));
+    GLbitfield flags = GL_SYNC_FLUSH_COMMANDS_BIT;
+    int waits = 0;
+    int result;
+    while ((result = glClientWaitSync(fence, flags, (GLuint64)5000000000)) ==
+           GL_TIMEOUT_EXPIRED) {
+        flags = 0;
+        if (++waits == 1) {
+            warn_report("nv2a: display fence not signalled after 5 s; "
+                        "still waiting (slow GPU?)");
+        }
+    }
     assert(result == GL_CONDITION_SATISFIED || result == GL_ALREADY_SIGNALED);
     glDeleteSync(fence);
 }

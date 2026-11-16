@@ -40,10 +40,16 @@ typedef struct MCPXAPUVPSSLData {
     int ssl_seg;
 } MCPXAPUVPSSLData;
 
+typedef struct VoiceSrcShadow VoiceSrcShadow;
+
 typedef struct MCPXAPUVoiceFilter {
     uint16_t voice;
     float resample_buf[NUM_SAMPLES_PER_FRAME * 2];
     SRC_STATE *resampler;
+    int resampler_ch;
+    bool bypassing;
+    float resample_buf_mono[NUM_SAMPLES_PER_FRAME];
+    VoiceSrcShadow *shadow;
     sv_filter svf[2];
     HrtfFilter hrtf;
 } MCPXAPUVoiceFilter;

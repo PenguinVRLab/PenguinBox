@@ -1,0 +1,9 @@
+schema: sim-profile/1
+kind: bindings
+id: sbc_identity
+device: sbc_wire
+target: steel_battalion
+bind:
+  - { source: aiming_x, target: aiming_x }
+  - { source: left_pedal, target: left_pedal }
+  - { source: main_weapon, target: main_weapon }

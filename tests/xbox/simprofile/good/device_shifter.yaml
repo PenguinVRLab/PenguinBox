@@ -1,0 +1,7 @@
+schema: sim-profile/1
+kind: device
+id: th8a
+source: sdl_joystick
+template: shifter_v1
+inputs:
+  - { id: gate, kind: detent, positions: [n, "1", "2", "3", "4", "5", "6", r] }

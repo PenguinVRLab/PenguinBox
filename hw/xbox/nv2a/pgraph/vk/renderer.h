@@ -56,6 +56,7 @@ typedef struct RenderPassState {
     VkFormat zeta_format;
     bool color_general;
     bool zeta_general;
+    uint8_t view_mask;
 } RenderPassState;
 
 typedef struct RenderPass {
@@ -155,6 +156,15 @@ typedef struct SurfaceBinding {
     VmaAllocation allocation_scratch;
 
     bool initialized;
+
+    unsigned int layers;
+    VkImageView image_view_layers;
+    VkImageView image_view_layer1;
+    bool twin_dirty;
+    VkImage fb_snap_image;
+    VmaAllocation fb_snap_allocation;
+    bool fb_snap_valid;
+    int fb_snap_draw_time;
 } SurfaceBinding;
 
 typedef struct ShaderModuleInfo {
@@ -246,6 +256,7 @@ typedef struct QueryReport {
     bool clear;
     uint32_t parameter;
     unsigned int query_count;
+    double wp_scale, wp_cap;
     int64_t enqueue_us;
 } QueryReport;
 
@@ -348,7 +359,20 @@ typedef struct PGRAPHVkDisplayState {
     VkFence present_published_fence;
     GLuint present_published_gl_id;
     bool present_published_valid;
+
+    hwaddr composited_vram_addr;
+    int composited_width, composited_height;
+    bool composited_valid;
+
+    VkImage eyes_image;
+    VmaAllocation eyes_allocation;
+    VkImageView eyes_view[2];
+    VkFramebuffer eyes_framebuffer[2];
+    VkDescriptorSet eyes_desc[2];
 } PGRAPHVkDisplayState;
+
+int xemu_perf_title_state(void);
+bool xemu_perf_title_validated(void);
 
 typedef struct ComputePipelineKey {
     VkFormat host_fmt;
@@ -443,6 +467,7 @@ typedef struct PGRAPHVkState {
     VkFramebuffer framebuffers[50];
     int framebuffer_index;
     bool framebuffer_dirty;
+    uint8_t framebuffer_view_mask;
 
     VkRenderPass render_pass;
     GArray *render_passes;
@@ -463,10 +488,21 @@ typedef struct PGRAPHVkState {
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
 
+    struct {
+        uint64_t cap;
+        uint64_t want[2];
+        uint64_t failed_bytes;
+        unsigned int scale;
+        unsigned int grows;
+        bool over_cap_logged;
+    } compute_pair;
+
     MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
     size_t num_vertex_ram_buffer_syncs;
     unsigned long *uploaded_bitmap;
+    unsigned long *mirror_stale_bitmap;
     size_t bitmap_size;
+    bool vtx_war_fix;
 
     VkVertexInputAttributeDescription vertex_attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
     int vertex_attribute_to_description_location[NV2A_VERTEXSHADER_ATTRIBUTES];
@@ -532,8 +568,12 @@ typedef struct PGRAPHVkState {
     int num_queries_in_flight;
     uint32_t queries_submitted;
     uint32_t *query_index_submit;
+    uint8_t render_pass_views;
+    uint8_t query_open_slots;
+    uint8_t *query_slot_views;
     bool async_queries_enabled;
     bool query_ring_enabled;
+    uint32_t query_eager_min_draws;
     uint32_t query_region_size;
     uint32_t query_num_regions;
     uint32_t query_ring_lag;
@@ -600,7 +640,21 @@ void pgraph_vk_ref_shader_module(ShaderModuleInfo *info);
 void pgraph_vk_unref_shader_module(PGRAPHVkState *r, ShaderModuleInfo *info);
 void pgraph_vk_destroy_shader_module(PGRAPHVkState *r, ShaderModuleInfo *info);
 
-void pgraph_vk_init_buffers(NV2AState *d);
+typedef struct PgraphVkBufferPlan {
+    VkDeviceSize size[BUFFER_COUNT];
+    bool device_local[BUFFER_COUNT];
+    const char *name[BUFFER_COUNT];
+    VkDeviceSize device_bytes;
+    VkDeviceSize host_bytes;
+} PgraphVkBufferPlan;
+
+void pgraph_vk_buffer_plan(NV2AState *d, PgraphVkBufferPlan *plan);
+static inline uint64_t pgraph_vk_mib_up(uint64_t bytes)
+{
+    return (bytes + (UINT64_C(1) << 20) - 1) >> 20;
+}
+char *pgraph_vk_describe_heaps(PGRAPHState *pg);
+bool pgraph_vk_init_buffers(NV2AState *d, Error **errp);
 void pgraph_vk_finalize_buffers(NV2AState *d);
 bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
                                     VkDeviceSize size,
@@ -636,6 +690,30 @@ VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
                                                    VkDeviceSize *sizes,
                                                    size_t count);
+bool pgraph_vk_vertex_ram_range_uploaded(PGRAPHVkState *r, hwaddr offset,
+                                         VkDeviceSize size);
+bool pgraph_vk_vertex_ram_range_stale(PGRAPHVkState *r, hwaddr offset,
+                                      VkDeviceSize size);
+void pgraph_vk_mark_vertex_ram_range_stale(PGRAPHVkState *r, hwaddr offset,
+                                           VkDeviceSize size);
+
+bool pgraph_vk_stereo_requested(void);
+bool pgraph_vk_stereo_device_features(bool multiview, bool multiview_gs);
+bool pgraph_vk_stereo_on(void);
+void pgraph_vk_stereo_init(void);
+unsigned int pgraph_vk_stereo_layers_for(const SurfaceBinding *target);
+void pgraph_vk_stereo_note_recreate(const SurfaceBinding *old,
+                                    unsigned int layers);
+void pgraph_vk_stereo_note_draw(NV2AState *d);
+uint8_t pgraph_vk_stereo_view_mask(const PGRAPHVkState *r);
+void pgraph_vk_stereo_render_pass_begun(PGRAPHVkState *r);
+void pgraph_vk_stereo_flip_begin(NV2AState *d);
+VkImageView pgraph_vk_stereo_display_view(SurfaceBinding *s);
+VkImageView pgraph_vk_stereo_eye_view(SurfaceBinding *s, unsigned int layer);
+bool pgraph_vk_stereo_mirror_changed(void);
+void pgraph_vk_stereo_finalize_display(PGRAPHState *pg);
+void pgraph_vk_stereo_fold_query_results(PGRAPHVkState *r, uint32_t base,
+                                         uint64_t *results, uint32_t n);
 
 void pgraph_vk_init_surfaces(PGRAPHState *pg);
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg);
@@ -662,13 +740,17 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
                               bool zeta_write);
 SurfaceBinding *pgraph_vk_surface_get(NV2AState *d, hwaddr addr);
 void pgraph_vk_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta);
-void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale);
 unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d);
-void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg);
+void pgraph_vk_latch_surface_scale_factor(PGRAPHState *pg);
 
 void pgraph_vk_init_compute(PGRAPHState *pg);
 bool pgraph_vk_compute_needs_finish(PGRAPHVkState *r);
 void pgraph_vk_compute_finish_complete(PGRAPHVkState *r);
+bool pgraph_vk_compute_pair_make_room(PGRAPHState *pg, uint64_t need_dst,
+                                      uint64_t need_src, const char *user);
+bool pgraph_vk_compute_pair_fits_or_request(PGRAPHVkState *r, uint64_t need_dst,
+                                            uint64_t need_src);
+void pgraph_vk_compute_pair_grow(PGRAPHVkState *r);
 void pgraph_vk_finalize_compute(PGRAPHState *pg);
 void pgraph_vk_dispatch_deswizzle_u32(PGRAPHState *pg, VkCommandBuffer cmd,
                                       unsigned int tex_w, unsigned int tex_h,
@@ -690,6 +772,7 @@ void pgraph_vk_wait_all_present_slots(PGRAPHState *pg);
 void pgraph_vk_init_textures(PGRAPHState *pg);
 void pgraph_vk_finalize_textures(PGRAPHState *pg);
 void pgraph_vk_bind_textures(NV2AState *d);
+void pgraph_vk_stamp_bound_textures(PGRAPHVkState *r);
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d, hwaddr addr,
                                             hwaddr size, bool use_exact_spans);
 bool pgraph_vk_note_exact_dirty(NV2AState *d, hwaddr addr, hwaddr size);
@@ -715,6 +798,8 @@ bool pgraph_vk_batch_qreset_enabled(void);
 void pgraph_vk_swap_query_region(PGRAPHVkState *r);
 bool pgraph_vk_pipe_opt_enabled(void);
 bool pgraph_vk_frame_overlap_enabled(void);
+bool pgraph_vk_overlap_desc_reuse(void);
+bool pgraph_vk_vtx_war_fix_enabled(void);
 void pgraph_vk_overlap_acquire_slot(PGRAPHState *pg);
 
 typedef enum FinishReason {

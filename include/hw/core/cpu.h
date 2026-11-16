@@ -295,6 +295,8 @@ struct CPUState {
     int cpu_index;
     int cluster_index;
     uint32_t tcg_cflags;
+    uint8_t xemu_fastptr_gate;
+    struct TranslationBlock *xemu_fastptr_cand;
     uint32_t halted;
     int32_t exception_index;
 
@@ -513,6 +515,9 @@ MemAccessCallback *mem_access_callback_insert(CPUState *cpu, MemoryRegion *mr,
 void mem_access_callback_remove_by_ref(CPUState *cpu, MemAccessCallback *cb);
 int mem_access_callback_address_matches(CPUState *cpu, hwaddr addr, hwaddr len);
 bool xemu_tlb_fastpath_enabled(void);
+void xemu_perf_title_publish(int validated);
+int xemu_perf_title_state(void);
+bool xemu_perf_title_validated(void);
 int mem_access_callback_address_matches_for_read(CPUState *cpu, hwaddr addr,
                                                  hwaddr len);
 void mem_access_callback_update_read_arming(CPUState *cpu, MemAccessCallback *cb);

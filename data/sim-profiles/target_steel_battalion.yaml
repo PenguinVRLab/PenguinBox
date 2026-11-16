@@ -1,0 +1,98 @@
+# Emulated target: Steel Battalion controller.
+# Button names are the xemu_vr SBC_BUTTON_* masks lower-cased (ui/xemu-input.h:63-109, branch
+# claude/sim-config-tech-stack-4570wk at 205d5f4). The 39 report buttons are bits 0..38; bits 34..38
+# are the five LATCHING toggles (SBC_TOGGLE_BITS_HI 0x7C, :111-114). gear_up/gear_down/tuner_left/
+# tuner_right are defined beyond the 39 report bits (:106-109); their use is INFERRED to be synthetic
+# presses that step the gear lever and tuner dial, and is marked so until confirmed in the code.
+# Axis domains follow the signal descriptor (design of record 3.2, the emulator's signal-descriptor reference test):
+# aiming is BIPOLAR with rest 0x8000. NOTE: ui/xemu-sim-preflight.c:35-36 flags aiming bipolar=false;
+# that flag appears to mean "signed int16", not physical polarity (see docs/profile-schema.md 7).
+# Blocks (`block:`, schema 2.2; T-3), set ONLY where a text source names the block. Sources: the teammate's guide
+# (github.com/quizerno/Steel-Battalion-Entry-Guide, Workspace/, pushed 2026-10-02; docs/teammate-guide-2026-10-02.md),
+# its TEXT only, never its manufacturer images:
+#   pedals  left/middle/right_pedal: "Left Pedal / Middle Pedal / Right Pedal" (Configurator Process Description.md,
+#           Step 2), the controller's "pedals" view (Configurator-Notes.md).
+#   left    sight_change_x/y and sight_change: "the left joystick's hat-stick (called Sight Change in game) ... Clicking
+#           down on the stick re-centers the camera" (Configurator-Notes.md, Alt-to-look); rotation_lever: "Left Joystick
+#           (signed 16-bit X Axis)" (Process Description, Step 2): the only single signed axis here besides sight change.
+#   right   aiming_x/y: "Right Joystick (unsigned 16-bit X-Y Axis)" (Process Description, Step 2); aiming is 0..65535.
+#   centre  the controls the notes move OFF the middle block "for players without a middle block" (Configurator-Notes.md,
+#           Consolidation): camera zoom in/out, night scope, line colour change; F.S.S., main/sub weapon control,
+#           reload (= magazine_change, INFERRED from the name), chaff; and "Maintenance": F1-F3, washing, extinguisher,
+#           manipulator, tank detach, override.
+# Left UNSET (no text source names their block; decisions O-22): gear_lever, tuner_dial, main_weapon, sub_weapon,
+# lock_on, eject, cockpit_hatch, ignition, start, the "Monitor" group (open_close, mode_select,
+# sub_monitor_mode_select, map_zoom_in_out: the notes say "remaining Middle Block and Monitor Controls", which does not
+# say whether Monitor is part of the middle block), com1-com5, the five latching toggles, and the four synthetic buttons.
+# Art (work/0021): devices/art/steel_battalion.svg, an ORIGINAL schematic of the controller's blocks (no manufacturer
+# image was used). An `anchor:` is set ONLY where a control's block is set above, and only at block level: the stick
+# controls on their lever's grip or hat, the pedals on their pedal, and the centre block's buttons on a grid of
+# buttons in the profile's order, which is NOT the real panel layout. Exact SBC panel positions await the owner's
+# photos, the same way the T.16000M was fixed from photos. The controls with no block (O-22) carry no anchor: the
+# chart lists them in its label columns with no leader line (a chart with partial anchors; canvas.anchored_layout).
+# `returns_to_rest: false` (schema 2.2, S-74) on aiming_x/y: the aiming lever stays where it is left (the owner,
+# 2026-10-09: "the right stick does not spring back to center"); every other axis springs back (the default).
+schema: sim-profile/1
+kind: target
+id: steel_battalion
+name: "Steel Battalion controller"
+art: devices/art/steel_battalion.svg
+core: xbox
+controls:
+  - { id: aiming_x,        kind: axis, min: 0, rest: 32768, max: 65535, block: right, anchor: [765, 95], returns_to_rest: false }
+  - { id: aiming_y,        kind: axis, min: 0, rest: 32768, max: 65535, block: right, anchor: [765, 135], returns_to_rest: false }
+  - { id: rotation_lever,  kind: axis, min: -32768, rest: 0, max: 32767, block: left, anchor: [130, 200] }
+  - { id: sight_change_x,  kind: axis, min: -32768, rest: 0, max: 32767, block: left, anchor: [118, 64] }
+  - { id: sight_change_y,  kind: axis, min: -32768, rest: 0, max: 32767, block: left, anchor: [130, 52] }
+  - { id: left_pedal,      kind: axis, min: 0, rest: 0, max: 65535, block: pedals, anchor: [330, 460] }
+  - { id: middle_pedal,    kind: axis, min: 0, rest: 0, max: 65535, block: pedals, anchor: [450, 460] }
+  - { id: right_pedal,     kind: axis, min: 0, rest: 0, max: 65535, block: pedals, anchor: [570, 460] }
+  - { id: gear_lever,      kind: detent }
+  - { id: tuner_dial,      kind: detent, positions: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }
+  - { id: main_weapon, kind: button }
+  - { id: sub_weapon, kind: button }
+  - { id: lock_on, kind: button }
+  - { id: eject, kind: button }
+  - { id: cockpit_hatch, kind: button }
+  - { id: ignition, kind: button }
+  - { id: start, kind: button }
+  - { id: open_close, kind: button }
+  - { id: map_zoom_in_out, kind: button }
+  - { id: mode_select, kind: button }
+  - { id: sub_monitor_mode_select, kind: button }
+  - { id: zoom_in, kind: button, block: centre, anchor: [315, 140] }
+  - { id: zoom_out, kind: button, block: centre, anchor: [369, 140] }
+  - { id: fss, kind: button, block: centre, anchor: [423, 140] }
+  - { id: manipulator, kind: button, block: centre, anchor: [477, 140] }
+  - { id: line_color_change, kind: button, block: centre, anchor: [531, 140] }
+  - { id: washing, kind: button, block: centre, anchor: [585, 140] }
+  - { id: extinguisher, kind: button, block: centre, anchor: [315, 185] }
+  - { id: chaff, kind: button, block: centre, anchor: [369, 185] }
+  - { id: tank_detach, kind: button, block: centre, anchor: [423, 185] }
+  - { id: override, kind: button, block: centre, anchor: [477, 185] }
+  - { id: night_scope, kind: button, block: centre, anchor: [531, 185] }
+  - { id: func1, kind: button, block: centre, anchor: [585, 185] }
+  - { id: func2, kind: button, block: centre, anchor: [315, 230] }
+  - { id: func3, kind: button, block: centre, anchor: [369, 230] }
+  - { id: main_weapon_control, kind: button, block: centre, anchor: [423, 230] }
+  - { id: sub_weapon_control, kind: button, block: centre, anchor: [477, 230] }
+  - { id: magazine_change, kind: button, block: centre, anchor: [531, 230] }
+  - { id: com1, kind: button }
+  - { id: com2, kind: button }
+  - { id: com3, kind: button }
+  - { id: com4, kind: button }
+  - { id: com5, kind: button }
+  - { id: sight_change, kind: button, block: left, anchor: [130, 64] }
+  - { id: filt_control_system, kind: button, latching: true }
+  - { id: oxygen_supply_system, kind: button, latching: true }
+  - { id: fuel_flow_rate, kind: button, latching: true }
+  - { id: buffer_material, kind: button, latching: true }
+  - { id: vt_location_measurement, kind: button, latching: true }
+  - { id: gear_up,     kind: button, synthetic: true }
+  - { id: gear_down,   kind: button, synthetic: true }
+  - { id: tuner_left,  kind: button, synthetic: true }
+  - { id: tuner_right, kind: button, synthetic: true }
+outputs:
+  # Panel LEDs: 22-byte HID output report, report_id 0x02 (hw/xbox/xid-steel-battalion.c:191).
+  # Per-LED byte/bit channels are not transcribed yet; a device profile declares them.
+  - { transport: hid, report_id: 2, length: 22, channels: [] }

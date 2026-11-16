@@ -23,6 +23,66 @@
 
 MCPXAPUState *g_state;
 
+int g_apu_ramptr;
+
+static void apu_ram_window_update(MCPXAPUState *d)
+{
+    uint64_t size = memory_region_size(d->ram);
+    MemoryRegionSection sec = memory_region_find(get_system_memory(), 0, size);
+    uint64_t w = 0;
+    if (sec.mr == d->ram && sec.offset_within_region == 0 &&
+        int128_get64(sec.size) == size) {
+        w = size;
+    }
+    if (sec.mr) {
+        memory_region_unref(sec.mr);
+    }
+    if (g_apu_ramptr && !w && d->ram_window) {
+        fprintf(stderr, "apu-ramptr: the guest-RAM window is no longer flat: reads go through the address space\n");
+    }
+    qatomic_set(&d->ram_window, w);
+}
+
+static void apu_ramptr_probe(MCPXAPUState *d)
+{
+    const char *v = getenv("XEMU_APU_RAMPTR");
+    g_apu_ramptr = (v && *v) ? atoi(v) : 0;
+    if (g_apu_ramptr < 0 || g_apu_ramptr > 2) {
+        g_apu_ramptr = 0;
+    }
+    apu_ram_window_update(d);
+    if (g_apu_ramptr && !d->ram_window) {
+        fprintf(stderr, "apu-ramptr: REFUSED (XEMU_APU_RAMPTR=%d): guest-physical [0, %" PRIu64 " MiB) is not one "
+                "flat RAM section; reads stay on the address space\n", g_apu_ramptr,
+                memory_region_size(d->ram) >> 20);
+        g_apu_ramptr = 0;
+    }
+    fprintf(stderr, "apu-ramptr: %s", g_apu_ramptr ? "ON" : "OFF");
+    if (g_apu_ramptr) {
+        fprintf(stderr, " (XEMU_APU_RAMPTR=%d: APU reads of guest RAM [0, %" PRIu64 " MiB) from the host pointer%s; "
+                "writes unchanged)", g_apu_ramptr, d->ram_window >> 20,
+                g_apu_ramptr == 2 ? ", each one compared with the address-space read" : "");
+    }
+    fprintf(stderr, "\n");
+}
+
+void apu_ramptr_check(MCPXAPUState *d, hwaddr addr, int size, uint32_t before, uint32_t got)
+{
+    uint32_t after = apu_ld_phys_as(addr, size);
+    if (unlikely(got != before && got != after)) {
+        static int reported;
+        if (qatomic_fetch_inc(&reported) < 16) {
+            fprintf(stderr, "apu-ramptr: MISMATCH at 0x%" HWADDR_PRIx " size %d: address space 0x%x, pointer 0x%x, address space 0x%x\n",
+                    addr, size, before, got, after);
+        }
+    } else if (unlikely(before != after)) {
+        static int raced;
+        if (qatomic_fetch_inc(&raced) < 4) {
+            fprintf(stderr, "apu-ramptr: race (the guest wrote during the check; the pointer read one of the two values) at 0x%" HWADDR_PRIx "\n", addr);
+        }
+    }
+}
+
 static void update_irq(MCPXAPUState *d)
 {
     if (d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
@@ -78,7 +138,7 @@ static void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
         qemu_cond_broadcast(&d->cond);
         break;
     case NV_PAPU_FEMEMDATA:
-        stl_le_phys(&address_space_memory, d->regs[NV_PAPU_FEMEMADDR], val);
+        apu_stl_le_phys(d, d->regs[NV_PAPU_FEMEMADDR], val);
         qatomic_set(&d->regs[addr], val);
         break;
     default:
@@ -343,6 +403,7 @@ static void mcpx_apu_vm_state_change(void *opaque, bool running, RunState state)
         qemu_mutex_unlock(&d->lock);
         bql_lock();
     } else {
+        apu_ram_window_update(d);
         qemu_mutex_lock(&d->lock);
         if (d->gp.dsp) {
             dsp_sync_from_vm(d->gp.dsp);
@@ -597,4 +658,5 @@ void mcpx_apu_init(PCIBus *bus, int devfn, MemoryRegion *ram)
 
     d->ram = ram;
     d->ram_ptr = memory_region_get_ram_ptr(d->ram);
+    apu_ramptr_probe(d);
 }

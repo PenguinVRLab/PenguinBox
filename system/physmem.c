@@ -709,14 +709,40 @@ AddressSpace *cpu_get_address_space(CPUState *cpu, int asidx)
 
 #ifdef XBOX
 
+static int g_perf_title_state;
+
+void xemu_perf_title_publish(int validated)
+{
+    qatomic_set(&g_perf_title_state, validated ? 1 : 2);
+}
+
+int xemu_perf_title_state(void)
+{
+    return qatomic_read(&g_perf_title_state);
+}
+
+bool xemu_perf_title_validated(void)
+{
+    return qatomic_read(&g_perf_title_state) == 1;
+}
+
 bool xemu_tlb_fastpath_enabled(void)
 {
     static int cached = -1;
     int v = qatomic_read(&cached);
 
     if (v < 0) {
-        v = (getenv("XEMU_TLB_FASTPATH") != NULL &&
-             getenv("XEMU_NO_TLB_FASTPATH") == NULL) ? 1 : 0;
+        if (getenv("XEMU_NO_TLB_FASTPATH")) {
+            v = 0;
+        } else if (getenv("XEMU_TLB_FASTPATH")) {
+            v = 1;
+        } else {
+            int t = xemu_perf_title_state();
+            if (t == 0) {
+                return false;
+            }
+            v = (t == 1) ? 1 : 0;
+        }
         qatomic_set(&cached, v);
     }
     return v != 0;

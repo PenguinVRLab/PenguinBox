@@ -37,8 +37,9 @@ set, are **proprietary**: copyright © Patrick Carey, all rights reserved,
 licensed to the recipient for personal use only under their own distribution
 terms, **no redistribution**.
 
-`private/` **never crosses into the public tree.** This is enforced mechanically
-by the release process. See
+`private/` **never crosses into the public tree.** This is enforced mechanically:
+it is absent from `tools/release/allowlist.txt`, and `tools/release/derive.py`
+aborts the run if any path under it reaches the output. See
 [../LICENSING.md](../LICENSING.md).
 
 ---

@@ -149,7 +149,7 @@ class Lib:
                 "utf-8"
             )
         except requests.exceptions.RequestException as e:
-            # Offline/slow builds must not hang or die in packaging over
+            # Offline/slow rig builds must not hang or die in packaging over
             # a license-text fetch; ship a pointer instead.
             return (
                 "License text unavailable at build time (" + str(e.__class__.__name__)

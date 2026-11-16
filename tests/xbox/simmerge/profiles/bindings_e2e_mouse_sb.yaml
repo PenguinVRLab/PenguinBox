@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simmerge: the merge layer's end-to-end fixture (written for XB-6, not the app's).
+schema: sim-profile/1
+kind: bindings
+id: e2e_mouse_sb
+device: e2e_mouse
+target: steel_battalion
+bind:
+  - { source: rel_x, target: aiming_x, response: { mode: integrate, counts_per_travel: 2000, recentre: middle } }
+  - { source: middle, target: main_weapon }

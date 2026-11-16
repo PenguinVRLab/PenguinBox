@@ -27,4 +27,15 @@ vma = declare_dependency(include_directories: vma_subproj.include_directories('V
 
 endif
 
+# rapidyaml (rapidyaml/README.md): the vr-mods file reader's YAML parser
+libryml = static_library('ryml', sources: files('rapidyaml/ryml.cc'),
+                         override_options: ['cpp_std=c++17'])
+ryml = declare_dependency(link_with: libryml,
+                          include_directories: include_directories('rapidyaml'))
+
+# cgltf (cgltf/README.md): the glTF 2.0 reader of the near-field layer's hand loader
+libcgltf = static_library('cgltf', sources: files('cgltf/cgltf.c'), c_args: ['-w'])
+cgltf = declare_dependency(link_with: libcgltf,
+                           include_directories: include_directories('cgltf'))
+
 subdir('nvapi')

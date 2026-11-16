@@ -23,12 +23,13 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/nv2a-renderer-status.h"
-#include "exec/xemu-guest-profile.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
 #include "util.h"
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
+#include "vr_worldproj.h"
+#include "vr_mods_glue.h"
 
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
 #define PG_SET_MASK(reg, mask, value)        \
@@ -319,6 +320,8 @@ static bool attempt_renderer_init(PGRAPHState *pg)
     }
     if (local_err) {
         const char *msg = error_get_pretty(local_err);
+        fprintf(stderr, "nv2a: the %s renderer did not start: %s\n",
+                pg->renderer->name, msg);
         xemu_queue_error_message(msg);
         error_free(local_err);
         local_err = NULL;
@@ -328,7 +331,7 @@ static bool attempt_renderer_init(PGRAPHState *pg)
     return true;
 }
 
-static void init_renderer(PGRAPHState *pg)
+static void init_renderer(PGRAPHState *pg, int prev)
 {
     CONFIG_DISPLAY_RENDERER requested = g_config.display.renderer;
     xemu_settings_note_requested_renderer(requested);
@@ -339,10 +342,25 @@ static void init_renderer(PGRAPHState *pg)
         return;
     }
 
+    int fallbacks[2], n_fallbacks = 0;
+    if (prev >= 0 && prev < CONFIG_DISPLAY_RENDERER__COUNT &&
+        prev != (int)requested && renderers[prev]) {
+        fallbacks[n_fallbacks++] = prev;
+    }
     CONFIG_DISPLAY_RENDERER default_renderer = get_default_renderer();
-    if (default_renderer != g_config.display.renderer) {
-        g_config.display.renderer = default_renderer;
-        if (attempt_renderer_init(pg)) {
+    if (default_renderer != requested &&
+        (n_fallbacks == 0 || fallbacks[0] != (int)default_renderer)) {
+        fallbacks[n_fallbacks++] = default_renderer;
+    }
+    for (int f = 0; f < n_fallbacks; f++) {
+        CONFIG_DISPLAY_RENDERER fallback = fallbacks[f];
+        xemu_settings_note_forced_renderer(fallback);
+        g_config.display.renderer = fallback;
+        if (!attempt_renderer_init(pg)) {
+            xemu_settings_note_forced_renderer(-1);
+            continue;
+        }
+        {
             bool vr_wanted =
                 g_config.vr.enable && requested == CONFIG_DISPLAY_RENDERER_VULKAN;
 
@@ -377,9 +395,12 @@ static void init_renderer(PGRAPHState *pg)
     exit(1);
 }
 
+static void pgraph_method_log_gate_probe(void);
+
 void pgraph_init_thread(NV2AState *d)
 {
-    init_renderer(&d->pgraph);
+    init_renderer(&d->pgraph, -1);
+    pgraph_method_log_gate_probe();
 }
 
 void pgraph_destroy(PGRAPHState *pg)
@@ -428,6 +449,8 @@ void nv2a_set_surface_scale_factor(unsigned int scale)
     qemu_mutex_lock(&d->pgraph.renderer_lock);
     if (d->pgraph.renderer->ops.set_surface_scale_factor) {
         d->pgraph.renderer->ops.set_surface_scale_factor(d, scale);
+    } else {
+        g_config.display.quality.surface_scale = scale < 1 ? 1 : scale;
     }
     qemu_mutex_unlock(&d->pgraph.renderer_lock);
     bql_lock();
@@ -596,6 +619,41 @@ static void pgraph_method_log(unsigned int subchannel,
     last = method;
 }
 
+static int method_log_gate_state = -1;
+
+static void pgraph_method_log_gate_probe(void)
+{
+    if (method_log_gate_state >= 0) {
+        return;
+    }
+    method_log_gate_state = (getenv("XEMU_METHOD_LOG_GATE") && !getenv("XEMU_NO_METHOD_LOG_GATE")) ? 1 : 0;
+    fprintf(stderr, "method-log-gate: %s\n",
+            method_log_gate_state ? "ON (trace log only while its events are enabled)"
+                                  : "OFF (trace log on every method word)");
+}
+
+static inline bool pgraph_method_log_wanted(void)
+{
+    if (unlikely(method_log_gate_state < 0)) {
+        pgraph_method_log_gate_probe();
+    }
+    if (!method_log_gate_state) {
+        return true;
+    }
+    return trace_event_get_state_backends(TRACE_NV2A_PGRAPH_METHOD) ||
+           trace_event_get_state_backends(TRACE_NV2A_PGRAPH_METHOD_ABBREV);
+}
+
+static inline void pgraph_method_trace(unsigned int subchannel,
+                                       unsigned int graphics_class,
+                                       unsigned int method, uint32_t parameter)
+{
+    if (pgraph_method_log_wanted()) {
+        pgraph_method_log(subchannel, graphics_class, method, parameter);
+        return;
+    }
+}
+
 static void pgraph_method_inc(MethodFunc handler, uint32_t end,
                               METHOD_HANDLER_ARG_DECL)
 {
@@ -607,8 +665,8 @@ static void pgraph_method_inc(MethodFunc handler, uint32_t end,
     for (size_t i = 0; i < count; i++) {
         parameter = ldl_le_p(parameters + i);
         if (i) {
-            pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE, method,
-                              parameter);
+            pgraph_method_trace(subchannel, NV_KELVIN_PRIMITIVE, method,
+                                parameter);
         }
         handler(METHOD_HANDLER_ARGS);
         method += 4;
@@ -626,8 +684,8 @@ static void pgraph_method_non_inc(MethodFunc handler, METHOD_HANDLER_ARG_DECL)
     for (size_t i = 0; i < num_words_available; i++) {
         parameter = ldl_le_p(parameters + i);
         if (i) {
-            pgraph_method_log(subchannel, NV_KELVIN_PRIMITIVE, method,
-                              parameter);
+            pgraph_method_trace(subchannel, NV_KELVIN_PRIMITIVE, method,
+                                parameter);
         }
         handler(METHOD_HANDLER_ARGS);
     }
@@ -707,7 +765,7 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
     uint32_t graphics_class = PG_GET_MASK(NV_PGRAPH_CTX_SWITCH1,
                                        NV_PGRAPH_CTX_SWITCH1_GRCLASS);
 
-    pgraph_method_log(subchannel, graphics_class, method, parameter);
+    pgraph_method_trace(subchannel, graphics_class, method, parameter);
 
     if (subchannel != 0) {
         assert(graphics_class != 0x97);
@@ -924,15 +982,27 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
     pg->frame_time++;
 }
 
+
+static uint64_t vr_worldproj_color_key(NV2AState *d, PGRAPHState *pg)
+{
+    if (!pg->dma_color || pg->dma_color >= memory_region_size(&d->ramin)) {
+        return 0;
+    }
+    DMAObject dma = nv_dma_load(d, pg->dma_color);
+    if (dma.dma_class != NV_DMA_IN_MEMORY_CLASS) {
+        return 0;
+    }
+    return (uint64_t)dma.address + pg->surface_color.offset;
+}
+
 DEF_METHOD(NV097, FLIP_STALL)
 {
     trace_nv2a_pgraph_flip_stall();
+    vr_worldproj_flip(pg, vr_worldproj_color_key(d, pg));
+    vr_mods_flip(d);
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
     nv2a_profile_flip_stall();
-#ifdef XBOX
-    xemu_guest_profile_flip();
-#endif
     pg->waiting_for_flip = true;
 }
 
@@ -1079,6 +1149,7 @@ DEF_METHOD(NV097, SET_COMBINER_SPECULAR_FOG_CW1)
 {
     pgraph_reg_w(pg, NV_PGRAPH_COMBINESPECFOG1, parameter);
 }
+
 
 DEF_METHOD(NV097, SET_TEXTURE_ADDRESS)
 {
@@ -1760,7 +1831,7 @@ DEF_METHOD_INC(NV097, SET_PROJECTION_MATRIX)
     int slot = (method - NV097_SET_PROJECTION_MATRIX) / 4;
     unsigned int row = NV_IGRAPH_XF_XFCTX_PMAT0 + slot/4;
     pg->vsh_constants[row][slot%4] = parameter;
-    pg->vsh_constants_dirty[row] = true;
+    pgraph_vsh_constant_dirty(pg, row);
 }
 
 DEF_METHOD_INC(NV097, SET_MODEL_VIEW_MATRIX)
@@ -1770,7 +1841,7 @@ DEF_METHOD_INC(NV097, SET_MODEL_VIEW_MATRIX)
     unsigned int entry = slot % 16;
     unsigned int row = NV_IGRAPH_XF_XFCTX_MMAT0 + matnum*8 + entry/4;
     pg->vsh_constants[row][entry % 4] = parameter;
-    pg->vsh_constants_dirty[row] = true;
+    pgraph_vsh_constant_dirty(pg, row);
 }
 
 DEF_METHOD_INC(NV097, SET_INVERSE_MODEL_VIEW_MATRIX)
@@ -1780,7 +1851,7 @@ DEF_METHOD_INC(NV097, SET_INVERSE_MODEL_VIEW_MATRIX)
     unsigned int entry = slot % 16;
     unsigned int row = NV_IGRAPH_XF_XFCTX_IMMAT0 + matnum*8 + entry/4;
     pg->vsh_constants[row][entry % 4] = parameter;
-    pg->vsh_constants_dirty[row] = true;
+    pgraph_vsh_constant_dirty(pg, row);
 }
 
 DEF_METHOD_INC(NV097, SET_COMPOSITE_MATRIX)
@@ -1788,7 +1859,7 @@ DEF_METHOD_INC(NV097, SET_COMPOSITE_MATRIX)
     int slot = (method - NV097_SET_COMPOSITE_MATRIX) / 4;
     unsigned int row = NV_IGRAPH_XF_XFCTX_CMAT0 + slot/4;
     pg->vsh_constants[row][slot%4] = parameter;
-    pg->vsh_constants_dirty[row] = true;
+    pgraph_vsh_constant_dirty(pg, row);
 }
 
 DEF_METHOD_INC(NV097, SET_TEXTURE_MATRIX)
@@ -1798,7 +1869,7 @@ DEF_METHOD_INC(NV097, SET_TEXTURE_MATRIX)
     unsigned int entry = slot % 16;
     unsigned int row = NV_IGRAPH_XF_XFCTX_T0MAT + tex*8 + entry/4;
     pg->vsh_constants[row][entry%4] = parameter;
-    pg->vsh_constants_dirty[row] = true;
+    pgraph_vsh_constant_dirty(pg, row);
 }
 
 DEF_METHOD_INC(NV097, SET_FOG_PARAMS)
@@ -1820,7 +1891,7 @@ DEF_METHOD_INC(NV097, SET_TEXGEN_PLANE_S)
     unsigned int entry = slot % 16;
     unsigned int row = NV_IGRAPH_XF_XFCTX_TG0MAT + tex*8 + entry/4;
     pg->vsh_constants[row][entry%4] = parameter;
-    pg->vsh_constants_dirty[row] = true;
+    pgraph_vsh_constant_dirty(pg, row);
 }
 
 DEF_METHOD(NV097, SET_TEXGEN_VIEW_MODEL)
@@ -1833,7 +1904,7 @@ DEF_METHOD_INC(NV097, SET_FOG_PLANE)
 {
     int slot = (method - NV097_SET_FOG_PLANE) / 4;
     pg->vsh_constants[NV_IGRAPH_XF_XFCTX_FOG][slot] = parameter;
-    pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_FOG] = true;
+    pgraph_vsh_constant_dirty(pg, NV_IGRAPH_XF_XFCTX_FOG);
 }
 
 struct CurveCoefficients {
@@ -1941,7 +2012,7 @@ DEF_METHOD_INC(NV097, SET_VIEWPORT_OFFSET)
 {
     int slot = (method - NV097_SET_VIEWPORT_OFFSET) / 4;
     pg->vsh_constants[NV_IGRAPH_XF_XFCTX_VPOFF][slot] = parameter;
-    pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_VPOFF] = true;
+    pgraph_vsh_constant_dirty(pg, NV_IGRAPH_XF_XFCTX_VPOFF);
 }
 
 DEF_METHOD_INC(NV097, SET_POINT_PARAMS)
@@ -1954,7 +2025,7 @@ DEF_METHOD_INC(NV097, SET_EYE_POSITION)
 {
     int slot = (method - NV097_SET_EYE_POSITION) / 4;
     pg->vsh_constants[NV_IGRAPH_XF_XFCTX_EYEP][slot] = parameter;
-    pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_EYEP] = true;
+    pgraph_vsh_constant_dirty(pg, NV_IGRAPH_XF_XFCTX_EYEP);
 }
 
 DEF_METHOD_INC(NV097, SET_COMBINER_FACTOR0)
@@ -1991,7 +2062,7 @@ DEF_METHOD_INC(NV097, SET_VIEWPORT_SCALE)
 {
     int slot = (method - NV097_SET_VIEWPORT_SCALE) / 4;
     pg->vsh_constants[NV_IGRAPH_XF_XFCTX_VPSCL][slot] = parameter;
-    pg->vsh_constants_dirty[NV_IGRAPH_XF_XFCTX_VPSCL] = true;
+    pgraph_vsh_constant_dirty(pg, NV_IGRAPH_XF_XFCTX_VPSCL);
 }
 
 DEF_METHOD_INC(NV097, SET_TRANSFORM_PROGRAM)
@@ -2018,8 +2089,9 @@ DEF_METHOD_INC(NV097, SET_TRANSFORM_CONSTANT)
                               NV_PGRAPH_CHEOPS_OFFSET_CONST_LD_PTR);
 
     assert(const_load < NV2A_VERTEXSHADER_CONSTANTS);
-    pg->vsh_constants_dirty[const_load] |=
-        (parameter != pg->vsh_constants[const_load][slot%4]);
+    if (parameter != pg->vsh_constants[const_load][slot%4]) {
+        pgraph_vsh_constant_dirty(pg, const_load);
+    }
     pg->vsh_constants[const_load][slot%4] = parameter;
 
     if (slot % 4 == 3) {
@@ -2471,6 +2543,7 @@ DEF_METHOD(NV097, SET_LOGIC_OP)
 
 DEF_METHOD(NV097, CLEAR_REPORT_VALUE)
 {
+    vr_worldproj_report_clear();
     d->pgraph.renderer->ops.clear_report_value(d);
 }
 
@@ -2503,6 +2576,24 @@ DEF_METHOD(NV097, SET_BEGIN_END)
             return;
         }
         nv2a_profile_inc_counter(NV2A_PROF_BEGIN_ENDS);
+        pg->query_eager_draws++;
+        if (vr_worldproj_active()) {
+            vr_worldproj_draw_target(vr_worldproj_color_key(d, pg),
+                                     pgraph_color_write_enabled(pg));
+        }
+        vr_worldproj_draw_extent(
+            pg,
+            pg->vertex_attributes[0].inline_buffer_populated ?
+                pg->vertex_attributes[0].inline_buffer :
+                NULL,
+            pg->inline_buffer_length);
+        if (vr_worldproj_end_skips(
+                pg, GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CSV0_D),
+                             NV_PGRAPH_CSV0_D_MODE) == 2)) {
+            pgraph_reset_inline_buffers(pg);
+            pg->primitive_mode = PRIM_TYPE_INVALID;
+            return;
+        }
         d->pgraph.renderer->ops.draw_end(d);
         pgraph_reset_inline_buffers(pg);
         pg->primitive_mode = PRIM_TYPE_INVALID;
@@ -2521,8 +2612,9 @@ DEF_METHOD(NV097, SET_BEGIN_END)
 DEF_METHOD(NV097, SET_TEXTURE_OFFSET)
 {
     int slot = (method - NV097_SET_TEXTURE_OFFSET) / 64;
+    bool changed = pgraph_reg_r(pg, NV_PGRAPH_TEXOFFSET0 + slot * 4) != parameter;
     pgraph_reg_w(pg, NV_PGRAPH_TEXOFFSET0 + slot * 4, parameter);
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, changed);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_FORMAT)
@@ -2549,6 +2641,7 @@ DEF_METHOD(NV097, SET_TEXTURE_FORMAT)
         GET_MASK(parameter, NV097_SET_TEXTURE_FORMAT_BASE_SIZE_P);
 
     unsigned int reg = NV_PGRAPH_TEXFMT0 + slot * 4;
+    uint32_t before = pgraph_reg_r(pg, reg);
     PG_SET_MASK(reg, NV_PGRAPH_TEXFMT0_CONTEXT_DMA, dma_select);
     PG_SET_MASK(reg, NV_PGRAPH_TEXFMT0_CUBEMAPENABLE, cubemap);
     PG_SET_MASK(reg, NV_PGRAPH_TEXFMT0_BORDER_SOURCE, border_source);
@@ -2559,35 +2652,39 @@ DEF_METHOD(NV097, SET_TEXTURE_FORMAT)
     PG_SET_MASK(reg, NV_PGRAPH_TEXFMT0_BASE_SIZE_V, log_height);
     PG_SET_MASK(reg, NV_PGRAPH_TEXFMT0_BASE_SIZE_P, log_depth);
 
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, pgraph_reg_r(pg, reg) != before);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_CONTROL0)
 {
     int slot = (method - NV097_SET_TEXTURE_CONTROL0) / 64;
+    bool changed = pgraph_reg_r(pg, NV_PGRAPH_TEXCTL0_0 + slot*4) != parameter;
     pgraph_reg_w(pg, NV_PGRAPH_TEXCTL0_0 + slot*4, parameter);
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, changed);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_CONTROL1)
 {
     int slot = (method - NV097_SET_TEXTURE_CONTROL1) / 64;
+    bool changed = pgraph_reg_r(pg, NV_PGRAPH_TEXCTL1_0 + slot*4) != parameter;
     pgraph_reg_w(pg, NV_PGRAPH_TEXCTL1_0 + slot*4, parameter);
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, changed);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_FILTER)
 {
     int slot = (method - NV097_SET_TEXTURE_FILTER) / 64;
+    bool changed = pgraph_reg_r(pg, NV_PGRAPH_TEXFILTER0 + slot * 4) != parameter;
     pgraph_reg_w(pg, NV_PGRAPH_TEXFILTER0 + slot * 4, parameter);
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, changed);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_IMAGE_RECT)
 {
     int slot = (method - NV097_SET_TEXTURE_IMAGE_RECT) / 64;
+    bool changed = pgraph_reg_r(pg, NV_PGRAPH_TEXIMAGERECT0 + slot * 4) != parameter;
     pgraph_reg_w(pg, NV_PGRAPH_TEXIMAGERECT0 + slot * 4, parameter);
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, changed);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_PALETTE)
@@ -2602,11 +2699,12 @@ DEF_METHOD(NV097, SET_TEXTURE_PALETTE)
         GET_MASK(parameter, NV097_SET_TEXTURE_PALETTE_OFFSET);
 
     unsigned int reg = NV_PGRAPH_TEXPALETTE0 + slot * 4;
+    uint32_t before = pgraph_reg_r(pg, reg);
     PG_SET_MASK(reg, NV_PGRAPH_TEXPALETTE0_CONTEXT_DMA, dma_select);
     PG_SET_MASK(reg, NV_PGRAPH_TEXPALETTE0_LENGTH, length);
     PG_SET_MASK(reg, NV_PGRAPH_TEXPALETTE0_OFFSET, offset);
 
-    pg->texture_dirty[slot] = true;
+    pgraph_texture_dirty(pg, slot, pgraph_reg_r(pg, reg) != before);
 }
 
 DEF_METHOD(NV097, SET_TEXTURE_BORDER_COLOR)
@@ -3089,7 +3187,13 @@ DEF_METHOD(NV097, LAUNCH_TRANSFORM_PROGRAM)
             &state_linkage, (float*)pg->vsh_constants);
     memcpy(state_linkage.input_regs, pg->vertex_state_shader_v0, sizeof(pg->vertex_state_shader_v0));
 
-    nv2a_vsh_emu_execute_track_context_writes(&state, &program, pg->vsh_constants_dirty);
+    bool written[NV2A_VERTEXSHADER_CONSTANTS] = { false };
+    nv2a_vsh_emu_execute_track_context_writes(&state, &program, written);
+    for (int row = 0; row < NV2A_VERTEXSHADER_CONSTANTS; row++) {
+        if (written[row]) {
+            pgraph_vsh_constant_dirty(pg, row);
+        }
+    }
 
     nv2a_vsh_program_destroy(&program);
 }
@@ -3272,6 +3376,7 @@ void pgraph_process_pending(NV2AState *d)
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_mutex_lock(&d->pgraph.lock);
 
+        int prev = pg->renderer ? (int)pg->renderer->type : -1;
         if (pg->renderer) {
             qemu_event_reset(&pg->flush_complete);
             pg->flush_pending = true;
@@ -3293,7 +3398,7 @@ void pgraph_process_pending(NV2AState *d)
             }
         }
 
-        init_renderer(pg);
+        init_renderer(pg, prev);
 
         qemu_mutex_unlock(&d->pgraph.renderer_lock);
         qemu_mutex_unlock(&d->pgraph.lock);

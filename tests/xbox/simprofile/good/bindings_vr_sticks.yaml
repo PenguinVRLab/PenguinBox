@@ -1,0 +1,8 @@
+schema: sim-profile/1
+kind: bindings
+id: sb_drive_stick
+device: vr_stick
+target: steel_battalion
+bind:
+  - { source: X, target: rotation_lever }
+  - { source: Y, target: sight_change_y }

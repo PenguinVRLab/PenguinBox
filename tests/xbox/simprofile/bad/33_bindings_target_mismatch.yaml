@@ -1,0 +1,10 @@
+# BAD fixture (work/0039): bindings_wheel.yaml with one change: the wheel's bindings typed for another controller. Load the good set with this file IN PLACE OF
+# bindings_wheel.yaml; it must be refused with BINDINGS_TARGET_MISMATCH.
+schema: sim-profile/1
+kind: bindings
+id: pgr2_wheel
+device: wheel
+target: steel_battalion
+bind:
+- source: paddle_up
+  target: main_weapon

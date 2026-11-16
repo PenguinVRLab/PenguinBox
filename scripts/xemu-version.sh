@@ -3,7 +3,11 @@
 set -eu
 
 dir="$1"
-XEMU_DATE=$(date -u)
+if test -n "${SOURCE_DATE_EPOCH:-}"; then
+  XEMU_DATE=$(date -u -d "@$SOURCE_DATE_EPOCH" 2>/dev/null || date -u -r "$SOURCE_DATE_EPOCH")
+else
+  XEMU_DATE=$(date -u)
+fi
 XEMU_COMMIT=$( \
   cd "$dir"; \
   if test -e .git; then \
@@ -31,10 +35,21 @@ get_version_dot () {
   echo $(get_version_field 1) | cut -d. -f$1
 }
 
-XEMU_VERSION_MAJOR=$(get_version_dot 1)
-XEMU_VERSION_MINOR=$(get_version_dot 2)
-XEMU_VERSION_PATCH=$(get_version_dot 3)
-XEMU_VERSION_COMMIT=$(get_version_field 2)
+# version.rc uses these as FILEVERSION a,b,c,d and xemu-version.c assigns
+# them to const int, so every one must be an integer. A tagged version like
+# '0.2-beta' otherwise yields an empty patch ('const int x = ;') and a
+# non-numeric commit field. XEMU_VERSION itself keeps the display string.
+num_or_zero() {
+  case "$1" in
+    ''|*[!0-9]*) echo 0 ;;
+    *)           echo "$1" ;;
+  esac
+}
+
+XEMU_VERSION_MAJOR=$(num_or_zero "$(get_version_dot 1)")
+XEMU_VERSION_MINOR=$(num_or_zero "$(get_version_dot 2)")
+XEMU_VERSION_PATCH=$(num_or_zero "$(get_version_dot 3)")
+XEMU_VERSION_COMMIT=$(num_or_zero "$(get_version_field 2)")
 
 cat <<EOF
 #define XEMU_VERSION       "$XEMU_VERSION"

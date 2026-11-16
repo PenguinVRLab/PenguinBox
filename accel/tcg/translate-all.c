@@ -242,6 +242,14 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     }
     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
 
+#ifdef XBOX
+    tb = tb_lazyval_lookup(cpu, s.pc, s.cs_base, s.flags, s.cflags, phys_pc, host_pc);
+    if (tb) {
+        assert_no_pages_locked();
+        return tb;
+    }
+#endif
+
     tb = inv_tb_htable_lookup(cpu, s);
     if (tb) {
         qemu_spin_lock(&tb->jmp_lock);

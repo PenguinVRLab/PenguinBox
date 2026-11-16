@@ -22,6 +22,7 @@ typedef struct XemuXrPfns {
     PFN_xrGetInstanceProperties GetInstanceProperties;
     PFN_xrGetSystem GetSystem;
     PFN_xrGetSystemProperties GetSystemProperties;
+    PFN_xrEnumerateEnvironmentBlendModes EnumerateEnvironmentBlendModes;
     PFN_xrResultToString ResultToString;
     PFN_xrPollEvent PollEvent;
     PFN_xrCreateSession CreateSession;
@@ -31,6 +32,8 @@ typedef struct XemuXrPfns {
     PFN_xrCreateReferenceSpace CreateReferenceSpace;
     PFN_xrDestroySpace DestroySpace;
     PFN_xrLocateSpace LocateSpace;
+    PFN_xrLocateViews LocateViews;
+    PFN_xrEnumerateViewConfigurationViews EnumerateViewConfigurationViews;
     PFN_xrCreateSwapchain CreateSwapchain;
     PFN_xrDestroySwapchain DestroySwapchain;
     PFN_xrEnumerateSwapchainFormats EnumerateSwapchainFormats;
@@ -42,10 +45,26 @@ typedef struct XemuXrPfns {
     PFN_xrBeginFrame BeginFrame;
     PFN_xrEndFrame EndFrame;
 
+    PFN_xrStringToPath StringToPath;
+    PFN_xrCreateActionSet CreateActionSet;
+    PFN_xrDestroyActionSet DestroyActionSet;
+    PFN_xrCreateAction CreateAction;
+    PFN_xrDestroyAction DestroyAction;
+    PFN_xrSuggestInteractionProfileBindings SuggestInteractionProfileBindings;
+    PFN_xrAttachSessionActionSets AttachSessionActionSets;
+    PFN_xrCreateActionSpace CreateActionSpace;
+    PFN_xrSyncActions SyncActions;
+    PFN_xrGetActionStatePose GetActionStatePose;
+    PFN_xrGetActionStateBoolean GetActionStateBoolean;
+
     PFN_xrGetVulkanGraphicsRequirements2KHR GetVulkanGraphicsRequirements2KHR;
     PFN_xrCreateVulkanInstanceKHR CreateVulkanInstanceKHR;
     PFN_xrGetVulkanGraphicsDevice2KHR GetVulkanGraphicsDevice2KHR;
     PFN_xrCreateVulkanDeviceKHR CreateVulkanDeviceKHR;
+
+    PFN_xrCreateHandTrackerEXT CreateHandTrackerEXT;
+    PFN_xrDestroyHandTrackerEXT DestroyHandTrackerEXT;
+    PFN_xrLocateHandJointsEXT LocateHandJointsEXT;
 } XemuXrPfns;
 
 extern XemuXrPfns xr_pfn;

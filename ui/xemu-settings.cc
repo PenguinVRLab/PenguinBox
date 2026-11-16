@@ -40,10 +40,17 @@
 struct config g_config;
 
 static CONFIG_DISPLAY_RENDERER g_requested_renderer = -1;
+static CONFIG_DISPLAY_RENDERER g_forced_renderer = -1;
 
 void xemu_settings_note_requested_renderer(CONFIG_DISPLAY_RENDERER r)
 {
     g_requested_renderer = r;
+    g_forced_renderer = -1;
+}
+
+void xemu_settings_note_forced_renderer(CONFIG_DISPLAY_RENDERER r)
+{
+    g_forced_renderer = r;
 }
 
 static const char *filename = "xemu.toml";
@@ -229,7 +236,16 @@ static std::string xemu_settings_generate_toml(void)
     g_config.input.allow_vibration = true;
 
     config_tree.update_from_struct(&g_config);
+    CNode *renderer_node = config_tree.child("display")->child("renderer");
+    bool substitute = g_forced_renderer >= 0 && g_requested_renderer >= 0 &&
+                      g_config.display.renderer == g_forced_renderer;
+    if (substitute) {
+        renderer_node->set_enum_by_index(g_requested_renderer);
+    }
     std::string toml = config_tree.generate_delta_toml();
+    if (substitute) {
+        renderer_node->set_enum_by_index(g_config.display.renderer);
+    }
 
     if (previous_numeric_locale) {
         setlocale(LC_NUMERIC, previous_numeric_locale);
@@ -237,13 +253,6 @@ static std::string xemu_settings_generate_toml(void)
     }
 
     return toml;
-}
-
-static void xemu_settings_apply_requested_renderer(void)
-{
-    if (g_requested_renderer >= 0) {
-        g_config.display.renderer = g_requested_renderer;
-    }
 }
 
 static bool xemu_settings_write_toml(const std::string &toml)
@@ -261,7 +270,6 @@ static bool xemu_settings_write_toml(const std::string &toml)
 
 void xemu_settings_save(void)
 {
-    xemu_settings_apply_requested_renderer();
     std::string toml = xemu_settings_generate_toml();
     if (xemu_settings_write_toml(toml)) {
         s_last_written_toml = toml;
@@ -305,6 +313,41 @@ void remove_net_nat_forward_ports(unsigned int index)
     cnode->children.erase(cnode->children.begin()+index);
     cnode->free_allocations(&g_config);
     cnode->store_to_struct(&g_config);
+}
+
+bool xemu_settings_sim_always_open(const char *title_id)
+{
+    for (unsigned int i = 0; i < g_config.sim.always_open_count; i++) {
+        const char *t = g_config.sim.always_open[i].title_id;
+        if (t && title_id && strcmp(t, title_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void xemu_settings_set_sim_always_open(const char *title_id, bool on)
+{
+    if (!title_id || !*title_id || xemu_settings_sim_always_open(title_id) == on) {
+        return;
+    }
+    auto cnode = config_tree.child("sim")->child("always_open");
+    cnode->update_from_struct(&g_config);
+    if (on) {
+        cnode->children.push_back(*cnode->array_item_type);
+        cnode->children.back().child("title_id")->set_string(title_id);
+    } else {
+        for (size_t i = 0; i < cnode->children.size(); i++) {
+            const char *t = g_config.sim.always_open[i].title_id;
+            if (t && strcmp(t, title_id) == 0) {
+                cnode->children.erase(cnode->children.begin() + i);
+                break;
+            }
+        }
+    }
+    cnode->free_allocations(&g_config);
+    cnode->store_to_struct(&g_config);
+    xemu_settings_save();
 }
 
 bool xemu_settings_load_gamepad_mapping(const char *guid,

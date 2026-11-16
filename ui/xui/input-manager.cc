@@ -2,6 +2,7 @@
 #include "input-manager.hh"
 #include "../xemu-input.h"
 #include "common.hh"
+#include "hw/xbox/nv2a/pgraph/vk/vr_ui_panel.h"
 
 InputManager g_input_mgr;
 
@@ -49,10 +50,56 @@ void InputManager::Update()
     }
 
 
+    const bool vr_ui = vr_ui_panel_owns_input();
+    if (vr_ui) {
+        controller_focus_capture = true;
+    }
+    uint32_t xr_buttons = 0;
+    VrUiPanelInput xr = {};
+    static bool s_xr_cursor;
+    if (s_xr_cursor) {
+        io.MouseDrawCursor = false;
+        s_xr_cursor = false;
+    }
+    if (vr_ui && vr_ui_panel_take_input(&xr)) {
+        static bool s_xr_mouse_down;
+        if (xr.pointer_valid) {
+            io.AddMousePosEvent(xr.u * io.DisplaySize.x,
+                                xr.v * io.DisplaySize.y);
+            if (xr.select != s_xr_mouse_down) {
+                io.AddMouseButtonEvent(0, xr.select);
+                s_xr_mouse_down = xr.select;
+            }
+            io.MouseDrawCursor = true;
+            s_xr_cursor = true;
+        } else {
+            if (s_xr_mouse_down) {
+                io.AddMouseButtonEvent(0, false);
+                s_xr_mouse_down = false;
+            }
+            if (xr.select) {
+                xr_buttons |= CONTROLLER_BUTTON_A;
+            }
+        }
+        if (xr.back) {
+            xr_buttons |= CONTROLLER_BUTTON_B;
+        }
+        if (xr.nav_x < -0.5f) xr_buttons |= CONTROLLER_BUTTON_DPAD_LEFT;
+        if (xr.nav_x > 0.5f) xr_buttons |= CONTROLLER_BUTTON_DPAD_RIGHT;
+        if (xr.nav_y > 0.5f) xr_buttons |= CONTROLLER_BUTTON_DPAD_UP;
+        if (xr.nav_y < -0.5f) xr_buttons |= CONTROLLER_BUTTON_DPAD_DOWN;
+        if (xr_buttons) {
+            m_navigating_with_controller = true;
+        }
+    }
+
+#ifdef XEMU_VR_UIPANEL_PLANTED_NOCAPTURE
+    controller_focus_capture = io.NavActive;
+#endif
     xemu_input_set_test_mode(controller_focus_capture);
 
     #define IM_SATURATE(V)                      (V < 0.0f ? 0.0f : V > 1.0f ? 1.0f : V)
-    #define MAP_BUTTON(KEY_NO, BUTTON_NO)       { io.AddKeyEvent(KEY_NO, !!(m_buttons & BUTTON_NO)); }
+    #define MAP_BUTTON(KEY_NO, BUTTON_NO)       { io.AddKeyEvent(KEY_NO, !!((m_buttons | xr_buttons) & BUTTON_NO)); }
     #define MAP_ANALOG(KEY_NO, AXIS_NO, V0, V1) { float vn = (float)(axis[AXIS_NO] - V0) / (float)(V1 - V0); vn = IM_SATURATE(vn); io.AddKeyAnalogEvent(KEY_NO, vn > 0.1f, vn); }
     const int thumb_dead_zone = 8000;
     MAP_BUTTON(ImGuiKey_GamepadStart,           CONTROLLER_BUTTON_START);

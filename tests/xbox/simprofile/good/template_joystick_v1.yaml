@@ -1,0 +1,8 @@
+schema: sim-profile/1
+kind: template
+id: joystick_v1
+mirror: false
+slots:
+  - { id: r1, side: right }
+  - { id: r2, side: right }
+  - { id: l1, side: left }

@@ -1,0 +1,13 @@
+# A profile: the mapping, shared by reference (work/0022). Per device (its instance, else its device profile id),
+# the bindings file to use; every file is typed for this profile's target.
+schema: sim-profile/1
+kind: profile
+id: pgr2_racing
+name: "PGR2 racing"
+target: xbox_duke
+game: { title_id: 0x00000001, name: "synthetic racing fixture" }
+bindings:
+  wheel: pgr2_wheel
+  racing_pedals: pgr2_pedals
+  th8a: pgr2_shifter
+  sinden_pedal: pedal_as_x

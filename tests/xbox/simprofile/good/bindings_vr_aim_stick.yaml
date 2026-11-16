@@ -1,0 +1,9 @@
+schema: sim-profile/1
+kind: bindings
+id: sb_aim_stick
+device: vr_stick
+target: steel_battalion
+bind:
+  - { source: X, target: aiming_x }
+  - { source: Y, target: aiming_y }
+  - { source: Trigger, target: main_weapon, threshold: 0.5, hysteresis: 0.1 }

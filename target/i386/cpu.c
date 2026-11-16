@@ -8586,7 +8586,21 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
     unsigned requested_lbr_fmt;
 
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+#ifdef XBOX
+    static int nopcrel = -1;
+    if (nopcrel < 0) {
+        const char *e = getenv("XEMU_TB_NOPCREL");
+        nopcrel = (e && *e && strcmp(e, "0")) ? 1 : 0;
+        if (nopcrel) {
+            fprintf(stderr, "xemu: XEMU_TB_NOPCREL=1 -- CF_PCREL off (single-entry jump-cache invalidation)\n");
+        }
+    }
+    if (!nopcrel) {
+        tcg_cflags_set(cs, CF_PCREL);
+    }
+#else
     tcg_cflags_set(cs, CF_PCREL);
+#endif
 #endif
 
     if (!cpu->vendor_cpuid_only && cpu->vendor_cpuid_only_v2) {

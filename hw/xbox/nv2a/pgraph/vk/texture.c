@@ -28,8 +28,8 @@
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "qemu/fast-hash.h"
 #include "qemu/lru.h"
-#include "hw/xbox/nv2a/pgraph/phase_timers.h"
 #include "renderer.h"
+#include "compute_need.h"
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode);
 
@@ -741,6 +741,53 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     }
 }
 
+static unsigned int vk_format_texel_size(VkFormat format);
+
+static void skip_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
+                                         TextureBinding *texture,
+                                         VkFormat format, Nv2aComputeNeed need)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    static bool logged;
+
+    if (!logged) {
+        logged = true;
+        fprintf(stderr,
+                "nv2a: depth surface-to-texture copy skipped: it needs %" PRIu64
+                " + %" PRIu64 " bytes of the compute buffers, %" PRIu64 " + %"
+                PRIu64 " at scale %u; later skips are not logged\n",
+                need.dst, need.src,
+                (uint64_t)r->storage_buffers[BUFFER_COMPUTE_DST].buffer_size,
+                (uint64_t)r->storage_buffers[BUFFER_COMPUTE_SRC].buffer_size,
+                pg->surface_scale_factor);
+    }
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    bool never_written = texture->current_layout == VK_IMAGE_LAYOUT_UNDEFINED;
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    if (never_written) {
+        VkClearColorValue zero = { { 0 } };
+        VkImageSubresourceRange range = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        };
+        vkCmdClearColorImage(cmd, texture->image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1,
+                             &range);
+    }
+    pgraph_vk_transition_image_layout(pg, cmd, texture->image, format,
+                                      texture->current_layout,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    texture->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    texture->draw_time = surface->draw_time;
+}
+
 static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
                                          TextureBinding *texture)
 {
@@ -753,6 +800,21 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
     bool use_compute_to_convert_depth_stencil =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
         surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+
+    {
+        unsigned int need_w = surface->width, need_h = surface->height;
+        pgraph_apply_scaling_factor(pg, &need_w, &need_h);
+        Nv2aComputeNeed need = nv2a_cn_zeta_to_texture(
+            (surface->host_fmt.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0,
+            (uint64_t)need_w * need_h, vk_format_texel_size(vkf.vk_format),
+            r->device_props.limits.minStorageBufferOffsetAlignment);
+        if (!pgraph_vk_compute_pair_make_room(pg, need.dst, need.src,
+                                              "surface-to-texture copy")) {
+            skip_zeta_surface_to_texture(pg, surface, texture, vkf.vk_format,
+                                         need);
+            return;
+        }
+    }
 
     bool compute_needs_finish = use_compute_to_convert_depth_stencil &&
                                 pgraph_vk_compute_needs_finish(r);
@@ -772,10 +834,7 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
                  scaled_height = surface->height;
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
-    size_t copied_image_size =
-        scaled_width * scaled_height * surface->host_fmt.host_bytes_per_pixel;
     size_t stencil_buffer_offset = 0;
-    size_t stencil_buffer_size = 0;
 
     int num_regions = 0;
     VkBufferImageCopy regions[2];
@@ -795,8 +854,6 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
         stencil_buffer_offset =
             ROUND_UP(scaled_width * scaled_height * 4,
                      r->device_props.limits.minStorageBufferOffsetAlignment);
-        stencil_buffer_size = scaled_width * scaled_height;
-        copied_image_size += stencil_buffer_size;
 
         regions[num_regions++] = (VkBufferImageCopy){
             .bufferOffset = stencil_buffer_offset,
@@ -811,7 +868,13 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
         };
     }
     StorageBuffer *dst_storage_buffer = &r->storage_buffers[BUFFER_COMPUTE_DST];
-    assert(dst_storage_buffer->buffer_size >= copied_image_size);
+    Nv2aComputeNeed need = nv2a_cn_zeta_to_texture(
+        (surface->host_fmt.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0,
+        (uint64_t)scaled_width * scaled_height,
+        vk_format_texel_size(vkf.vk_format),
+        r->device_props.limits.minStorageBufferOffsetAlignment);
+    assert(nv2a_cn_fits(need, dst_storage_buffer->buffer_size,
+                        r->storage_buffers[BUFFER_COMPUTE_SRC].buffer_size));
 
     pgraph_vk_surface_transition(pg, cmd, surface,
                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1067,6 +1130,15 @@ static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
     return surface_to_texture_compat_reason(surface, shape) == S2T_COMPAT_OK;
 }
 
+static int perf_paths_default_on(void)
+{
+    int t = xemu_perf_title_state();
+    if (t == 0) {
+        return -1;
+    }
+    return (t == 1) ? 1 : 0;
+}
+
 static bool surf2tex_ext_enabled(void)
 {
     static int state = -1;
@@ -1079,11 +1151,18 @@ static bool surf2tex_ext_enabled(void)
                         "— extended surface-as-texture gather off\n");
             }
         } else {
-            state = getenv("XEMU_SURF2TEX_EXT") ? 1 : 0;
+            if (getenv("XEMU_SURF2TEX_EXT")) {
+                state = 1;
+            } else {
+                state = perf_paths_default_on();
+                if (state < 0) {
+                    return false;
+                }
+            }
             if (state == 1) {
                 fprintf(stderr,
-                        "nv2a: XEMU_SURF2TEX_EXT on — multi-surface gather GPU "
-                        "copy for surface-as-texture binds (replaces the "
+                        "nv2a: surf2tex-ext ON (validated title) — multi-surface gather "
+                        "GPU copy for surface-as-texture binds (replaces the "
                         "download+rehash fallback where row-compatible)\n");
             }
         }
@@ -1098,10 +1177,17 @@ static bool surf2tex_zerocopy_enabled(void)
         if (getenv("XEMU_NO_SURF2TEX_ZEROCOPY")) {
             state = 0;
         } else {
-            state = getenv("XEMU_SURF2TEX_ZEROCOPY") ? 1 : 0;
+            if (getenv("XEMU_SURF2TEX_ZEROCOPY")) {
+                state = 1;
+            } else {
+                state = perf_paths_default_on();
+                if (state < 0) {
+                    return false;
+                }
+            }
             if (state == 1) {
                 fprintf(stderr,
-                        "nv2a: XEMU_SURF2TEX_ZEROCOPY on — exact-match "
+                        "nv2a: surf2tex-zerocopy ON (validated title) — exact-match "
                         "surface-as-texture binds sample the surface image "
                         "directly (no per-rebind copy)\n");
             }
@@ -1117,11 +1203,14 @@ static bool surf2tex_feedback_enabled(void)
         if (getenv("XEMU_NO_SURF2TEX_FEEDBACK")) {
             state = 0;
         } else {
-            state = (getenv("XEMU_SURF2TEX_FEEDBACK") &&
+            if (xemu_perf_title_state() == 0) {
+                return false;
+            }
+            state = (xemu_perf_title_validated() &&
                      surf2tex_zerocopy_enabled()) ? 1 : 0;
             if (state == 1) {
                 fprintf(stderr,
-                        "nv2a: XEMU_SURF2TEX_FEEDBACK on — still-bound render "
+                        "nv2a: surf2tex-feedback ON (validated title) — still-bound render "
                         "targets are sampled zero-copy in GENERAL layout (the "
                         "cockpit feedback pattern)\n");
             } else if (getenv("XEMU_SURF2TEX_FEEDBACK")) {
@@ -1134,7 +1223,132 @@ static bool surf2tex_feedback_enabled(void)
     return state == 1;
 }
 
-static void surf2tex_zerocopy_ensure(PGRAPHState *pg, SurfaceBinding *surface)
+static bool fb_snapshot_enabled(void)
+{
+    return true;
+}
+
+
+
+static void fb_snapshot_ensure_image(PGRAPHState *pg, SurfaceBinding *surface)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    static bool said_in_use, said_failed;
+    if (surface->fb_snap_image != VK_NULL_HANDLE) {
+        return;
+    }
+    unsigned int w = surface->width ? surface->width : 1;
+    unsigned int h = surface->height ? surface->height : 1;
+    pgraph_apply_scaling_factor(pg, &w, &h);
+    VkImageCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent = { w, h, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = surface->host_fmt.vk_format,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VmaAllocationCreateInfo ai = { .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE };
+    VkResult res = vmaCreateImage(r->allocator, &ci, &ai, &surface->fb_snap_image,
+                                  &surface->fb_snap_allocation, NULL);
+    surface->fb_snap_valid = false;
+    if (res != VK_SUCCESS) {
+        surface->fb_snap_image = VK_NULL_HANDLE;
+        surface->fb_snap_allocation = VK_NULL_HANDLE;
+        if (!said_failed) {
+            said_failed = true;
+            fprintf(stderr, "nv2a: feedback snapshot image of %ux%u could not be allocated (VkResult %d): "
+                            "that surface is sampled live; later failures are not logged\n", w, h, res);
+        }
+        return;
+    }
+    if (!said_in_use) {
+        said_in_use = true;
+        fprintf(stderr, "nv2a: feedback snapshot in use: a render target sampled while it is bound is read from a "
+                        "copy taken at each feedback flush (first surface %08" HWADDR_PRIx " %ux%u)\n",
+                surface->vram_addr, w, h);
+    }
+}
+
+static bool fb_snapshot_wanted(SurfaceBinding *surface)
+{
+    return surface->feedback_mode && fb_snapshot_enabled() &&
+           surface->fb_snap_image != VK_NULL_HANDLE &&
+           surface->image_layout == VK_IMAGE_LAYOUT_GENERAL &&
+           (!surface->fb_snap_valid || surface->fb_snap_draw_time != surface->draw_time);
+}
+
+static void fb_snapshot_refresh(PGRAPHState *pg, VkCommandBuffer cmd, SurfaceBinding *surface)
+{
+    unsigned int w = surface->width ? surface->width : 1;
+    unsigned int h = surface->height ? surface->height : 1;
+    pgraph_apply_scaling_factor(pg, &w, &h);
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1,
+    };
+    VkImageMemoryBarrier pre[2] = {
+        { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = surface->image, .subresourceRange = range },
+        { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+          .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+          .oldLayout = surface->fb_snap_valid ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+          .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = surface->fb_snap_image, .subresourceRange = range },
+    };
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, pre);
+    VkImageCopy region = {
+        .srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
+        .dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
+        .extent = { w, h, 1 },
+    };
+    vkCmdCopyImage(cmd, surface->image, VK_IMAGE_LAYOUT_GENERAL, surface->fb_snap_image,
+                   VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+    VkImageMemoryBarrier post[2] = {
+        { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = surface->fb_snap_image, .subresourceRange = range },
+        { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+          .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = surface->image, .subresourceRange = range },
+    };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         0, 0, NULL, 0, NULL, 2, post);
+    surface->fb_snap_valid = true;
+    surface->fb_snap_draw_time = surface->draw_time;
+}
+
+
+
+
+
+static bool fb_stage_sampled(PGRAPHState *pg, int stage)
+{
+    uint32_t mode = (pgraph_reg_r(pg, NV_PGRAPH_SHADERPROG) >> (stage * 5)) & 0x1F;
+    return mode != PS_TEXTUREMODES_NONE;
+}
+
+static void surf2tex_zerocopy_ensure(PGRAPHState *pg, SurfaceBinding *surface,
+                                     bool sampled)
 {
     VkImageLayout want = surface->feedback_mode ?
                              VK_IMAGE_LAYOUT_GENERAL :
@@ -1142,6 +1356,14 @@ static void surf2tex_zerocopy_ensure(PGRAPHState *pg, SurfaceBinding *surface)
     bool need_transition = surface->image_layout != want;
     bool need_flush = surface->feedback_mode &&
                       surface->flushed_draw_time != surface->draw_time;
+    bool snap_gate = sampled || !surface->fb_snap_valid;
+    bool need_snap = snap_gate && fb_snapshot_wanted(surface);
+    if (need_snap && !need_transition && !need_flush) {
+        VkCommandBuffer scmd = pgraph_vk_begin_nondraw_commands(pg);
+        fb_snapshot_refresh(pg, scmd, surface);
+        pgraph_vk_end_nondraw_commands(pg, scmd);
+        return;
+    }
     if (!need_transition && !need_flush) {
         return;
     }
@@ -1154,8 +1376,12 @@ static void surf2tex_zerocopy_ensure(PGRAPHState *pg, SurfaceBinding *surface)
         surface->flushed_draw_time = surface->draw_time;
         nv2a_profile_inc_counter(NV2A_PROF_ZC_FLUSHES);
     }
+    if (snap_gate && fb_snapshot_wanted(surface)) {
+        fb_snapshot_refresh(pg, cmd, surface);
+    }
     pgraph_vk_end_nondraw_commands(pg, cmd);
 }
+
 
 #define SURF2TEX_GATHER_MAX_REGIONS 16
 
@@ -1264,46 +1490,6 @@ static S2TGatherResult build_surf2tex_gather_plan(NV2AState *d, hwaddr tex_base,
     return S2T_GATHER_OK;
 }
 
-static void surf2tex_debug_dump_miss(NV2AState *d, hwaddr tex_base,
-                                     const TextureShape *shape,
-                                     SurfaceBinding *exact)
-{
-    static int gate = -1;
-    if (gate < 0) {
-        gate = getenv("XEMU_SURF2TEX_DEBUG") ? 1 : 0;
-    }
-    if (!gate) {
-        return;
-    }
-    static int64_t win_start;
-    static int win_count;
-    int64_t now = g_get_monotonic_time();
-    if (now - win_start > (int64_t)5 * G_USEC_PER_SEC) {
-        win_start = now;
-        win_count = 0;
-    }
-    if (win_count++ >= 20) {
-        return;
-    }
-    BasicColorFormatInfo fb = kelvin_color_format_info_map[shape->color_format];
-    fprintf(stderr,
-            "s2t-miss: tex=%08" HWADDR_PRIx " %ux%u pitch=%u fmt=%02x lin=%d "
-            "lvls=%d",
-            tex_base, shape->width, shape->height, shape->pitch,
-            shape->color_format, fb.linear, shape->levels);
-    SurfaceBinding *s = exact ? exact
-                              : pgraph_vk_surface_get_within(
-                                    d, tex_base);
-    if (s) {
-        fprintf(stderr,
-                " | surf=%08" HWADDR_PRIx " %ux%u pitch=%u swz=%d color=%d "
-                "bpp=%u\n",
-                s->vram_addr, s->width, s->height, s->pitch, s->swizzle,
-                s->color, s->host_fmt.host_bytes_per_pixel);
-    } else {
-        fprintf(stderr, " | surf=none-within\n");
-    }
-}
 
 static void copy_gather_plan_to_texture(PGRAPHState *pg,
                                         Surf2TexGatherPlan *plan,
@@ -1768,6 +1954,7 @@ static bool is_linear_filter_supported_for_format(PGRAPHVkState *r,
            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 }
 
+
 static void create_texture(PGRAPHState *pg, int texture_idx)
 {
     NV2A_VK_DGROUP_BEGIN("Creating texture %d", texture_idx);
@@ -1923,7 +2110,12 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                        !pgraph_vk_compute_needs_finish(r_) &&
                        !other_surface_overlaps_range(r_, host,
                                                      texture_vram_offset,
-                                                     tex_len)) {
+                                                     tex_len) &&
+                       pgraph_vk_compute_pair_fits_or_request(
+                           r_,
+                           (DIV_ROUND_UP(delta + tex_len, (size_t)host->pitch) -
+                            delta / host->pitch) * (size_t)host->pitch,
+                           tex_len)) {
                 s2t_path = S2T_PATH_BOUNCE;
             }
         }
@@ -1975,8 +2167,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                         NV2A_PROF_S2T_REJ_NONE_RESIDENT,
                 };
                 nv2a_profile_inc_counter(rej_counter[s2t_rej]);
-                surf2tex_debug_dump_miss(d, texture_vram_offset, &state,
-                                         surface);
             }
         }
     }
@@ -2056,7 +2246,6 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         nv2a_profile_inc_counter(NV2A_PROF_TEX_HASH);
         g_nv2a_stats.frame_working.counters[NV2A_PROF_TEX_HASH_KB] +=
             (int)(texture_length >> 10);
-        NV2A_PHASE_LEAF(PF_LEAF_TEXHASH);
         content_hash = fast_hash(texture_data, texture_length);
         if (is_indexed) {
             content_hash ^= fast_hash(palette_data, texture_palette_data_size);
@@ -2066,7 +2255,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     if (binding_found) {
         if (surface_to_texture) {
             if (snode->borrowed) {
-                surf2tex_zerocopy_ensure(pg, surface);
+                surf2tex_zerocopy_ensure(pg, surface,
+                                         fb_stage_sampled(pg, texture_idx));
                 surface->last_use_submit = r->submit_count;
             } else if (s2t_plan_valid) {
                 if ((int)s2t_plan.draw_time_key != snode->draw_time) {
@@ -2188,6 +2378,12 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         .components = vkf.component_map,
     };
 
+    if (s2t_zerocopy && s2t_feedback && fb_snapshot_enabled()) {
+        fb_snapshot_ensure_image(pg, surface);
+        if (surface->fb_snap_image != VK_NULL_HANDLE) {
+            image_view_create_info.image = surface->fb_snap_image;
+        }
+    }
     VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
                                &snode->image_view));
 
@@ -2312,7 +2508,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (surface_to_texture) {
         if (s2t_zerocopy) {
-            surf2tex_zerocopy_ensure(pg, surface);
+            surf2tex_zerocopy_ensure(pg, surface,
+                                     fb_stage_sampled(pg, texture_idx));
             surface->last_use_submit = r->submit_count;
             snode->current_layout = snode->descriptor_layout;
             snode->draw_time = surface->draw_time;
@@ -2358,6 +2555,16 @@ static void update_timestamps(PGRAPHVkState *r)
     }
 }
 
+void pgraph_vk_stamp_bound_textures(PGRAPHVkState *r)
+{
+    for (int i = 0; i < ARRAY_SIZE(r->texture_bindings); i++) {
+        if (r->texture_bindings[i]) {
+            r->texture_bindings[i]->submit_time = r->submit_count;
+        }
+    }
+}
+
+
 void pgraph_vk_bind_textures(NV2AState *d)
 {
     NV2A_VK_DGROUP_BEGIN("%s", __func__);
@@ -2381,7 +2588,7 @@ void pgraph_vk_bind_textures(NV2AState *d)
                                     VK_IMAGE_LAYOUT_GENERAL :
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (bs->image_layout != bs_want || bs->feedback_mode) {
-            surf2tex_zerocopy_ensure(pg, bs);
+            surf2tex_zerocopy_ensure(pg, bs, fb_stage_sampled(pg, i));
             bs->last_use_submit = r->submit_count;
         }
     }
@@ -2417,6 +2624,8 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->allocation = VK_NULL_HANDLE;
     snode->image_view = VK_NULL_HANDLE;
     snode->sampler = VK_NULL_HANDLE;
+    snode->possibly_dirty = false;
+    snode->borrowed = false;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)

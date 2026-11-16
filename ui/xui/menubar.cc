@@ -195,7 +195,9 @@ void ShowMainMenu()
 #endif
                 );
 
-            int rendering_scale = nv2a_get_surface_scale_factor() - 1;
+            int config_scale = g_config.display.quality.surface_scale;
+            config_scale = config_scale < 1 ? 1 : (config_scale > 10 ? 10 : config_scale);
+            int rendering_scale = config_scale - 1;
             if (ImGui::Combo("Int. Resolution Scale", &rendering_scale,
                              "1x\0"
                              "2x\0"
@@ -208,6 +210,18 @@ void ShowMainMenu()
                              "9x\0"
                              "10x\0")) {
                 nv2a_set_surface_scale_factor(rendering_scale + 1);
+                config_scale = rendering_scale + 1;
+            }
+            if (config_scale != (int)nv2a_get_surface_scale_factor()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
+                char label[64];
+                snprintf(label, sizeof(label),
+                         "Restart required (%dx): open Display settings",
+                         config_scale);
+                if (ImGui::MenuItem(label)) {
+                    g_main_menu.SetNextViewIndexWithFocus(2);
+                }
+                ImGui::PopStyleColor();
             }
 
             ImGui::Combo("Display Mode", &g_config.display.ui.fit,

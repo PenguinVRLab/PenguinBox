@@ -540,6 +540,28 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
         next_struct = &custom_border_features;
     }
 
+    VkPhysicalDeviceMultiviewFeatures multiview_features;
+    if (pgraph_vk_stereo_requested()) {
+        VkPhysicalDeviceMultiviewFeatures query = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES,
+        };
+        VkPhysicalDeviceFeatures2 features2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &query,
+        };
+        vkGetPhysicalDeviceFeatures2(r->physical_device, &features2);
+        if (pgraph_vk_stereo_device_features(query.multiview,
+                                             query.multiviewGeometryShader)) {
+            multiview_features = (VkPhysicalDeviceMultiviewFeatures){
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES,
+                .multiview = VK_TRUE,
+                .multiviewGeometryShader = VK_TRUE,
+                .pNext = next_struct,
+            };
+            next_struct = &multiview_features;
+        }
+    }
+
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
@@ -615,6 +637,58 @@ static bool init_allocator(PGRAPHState *pg, Error **errp)
     return true;
 }
 
+static bool check_buffer_memory(PGRAPHState *pg, Error **errp)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PgraphVkBufferPlan plan;
+    const VkPhysicalDeviceMemoryProperties *mp;
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+    uint64_t dev_free = 0, host_free = 0;
+    bool have_host_heap = false;
+
+    pgraph_vk_buffer_plan(container_of(pg, NV2AState, pgraph), &plan);
+    vmaGetMemoryProperties(r->allocator, &mp);
+    vmaGetHeapBudgets(r->allocator, budgets);
+    for (uint32_t h = 0; h < mp->memoryHeapCount; h++) {
+        uint64_t free_h = budgets[h].budget > budgets[h].usage ?
+                              budgets[h].budget - budgets[h].usage : 0;
+        if (mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            dev_free = MAX(dev_free, free_h);
+        } else {
+            have_host_heap = true;
+            host_free = MAX(host_free, free_h);
+        }
+    }
+    bool unified = !have_host_heap;
+    uint64_t need_dev = plan.device_bytes + (unified ? plan.host_bytes : 0);
+    bool fits = need_dev <= dev_free;
+    bool fits_spilled = !unified &&
+                        plan.device_bytes + plan.host_bytes <= dev_free + host_free;
+
+    fprintf(stderr,
+            "nv2a/vk: memory check: the working buffers need %" PRIu64
+            " MiB device-local and %" PRIu64 " MiB host; %s offers %" PRIu64
+            " MiB device-local and %" PRIu64 " MiB host now: %s\n",
+            pgraph_vk_mib_up(plan.device_bytes), pgraph_vk_mib_up(plan.host_bytes),
+            r->device_props.deviceName, dev_free >> 20, host_free >> 20,
+            fits ? "fits" : fits_spilled ? "fits only with part of them in "
+                                           "system memory (slower)" : "does not fit");
+    if (fits || fits_spilled) {
+        return true;
+    }
+    g_autofree char *heaps = pgraph_vk_describe_heaps(pg);
+    error_setg(errp,
+               "%s has %" PRIu64 " MiB of device-local and %" PRIu64 " MiB of "
+               "host memory free for PenguinBox, and the Vulkan renderer needs "
+               "%" PRIu64 " MiB device-local and %" PRIu64 " MiB host at start "
+               "(%s). Close other GPU-heavy apps, or use the OpenGL renderer "
+               "(display.renderer = 'OPENGL')",
+               r->device_props.deviceName, dev_free >> 20, host_free >> 20,
+               pgraph_vk_mib_up(need_dev),
+               pgraph_vk_mib_up(unified ? 0 : plan.host_bytes), heaps);
+    return false;
+}
+
 void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp)
 {
     xemu_vr_begin_bootstrap(pg);
@@ -622,7 +696,8 @@ void pgraph_vk_init_instance(PGRAPHState *pg, Error **errp)
     if (create_instance(pg, errp) &&
         select_physical_device(pg, errp) &&
         create_logical_device(pg, errp) &&
-        init_allocator(pg, errp)) {
+        init_allocator(pg, errp) &&
+        check_buffer_memory(pg, errp)) {
         xemu_vr_on_device_created(pg);
         return;
     }

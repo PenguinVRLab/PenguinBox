@@ -1,0 +1,9 @@
+# An axis onto a digital button (S-74; docs/profile-schema.md 3, axis -> button): the pedal fires the main weapon when
+# pressed past half travel and lets go below a quarter (threshold 0.5, hysteresis 0.25; canonical, the pedal is unipolar).
+schema: sim-profile/1
+kind: bindings
+id: sbc_pedal_fire
+device: sbc_wire
+target: steel_battalion
+bind:
+  - { source: left_pedal, target: main_weapon, threshold: 0.5, hysteresis: 0.25 }

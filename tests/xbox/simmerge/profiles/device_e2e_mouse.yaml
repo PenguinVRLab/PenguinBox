@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simmerge: the merge layer's end-to-end fixture (written for XB-6, not the app's).
+schema: sim-profile/1
+kind: device
+id: e2e_mouse
+source: mouse
+inputs:
+  - { id: rel_x, kind: relative, code: 0 }
+  - { id: middle, kind: button, code: 274 }

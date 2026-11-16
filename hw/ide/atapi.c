@@ -29,6 +29,7 @@
 #include "system/block-backend.h"
 #include "scsi/constants.h"
 #include "ide-internal.h"
+#include "hw/ide/atapi-read-patch.h"
 #include "trace.h"
 
 #define ATAPI_SECTOR_BITS (2 + BDRV_SECTOR_BITS)
@@ -83,6 +84,8 @@ static void cd_data_to_raw(uint8_t *buf, int lba)
     memset(buf, 0, 288);
 }
 
+void (*ide_atapi_read_patch)(int64_t lba, uint8_t *data, int nb_sectors);
+
 static int
 cd_read_sector_sync(IDEState *s)
 {
@@ -112,6 +115,10 @@ cd_read_sector_sync(IDEState *s)
     if (ret < 0) {
         block_acct_failed(blk_get_stats(s->blk), &s->acct);
     } else {
+        if (ide_atapi_read_patch) {
+            ide_atapi_read_patch(s->lba, s->io_buffer +
+                                 (s->cd_sector_size == 2352 ? 16 : 0), 1);
+        }
         block_acct_done(blk_get_stats(s->blk), &s->acct);
         s->lba++;
         s->io_buffer_index = 0;
@@ -134,6 +141,10 @@ static void cd_read_sector_cb(void *opaque, int ret)
 
     block_acct_done(blk_get_stats(s->blk), &s->acct);
 
+    if (ide_atapi_read_patch) {
+        ide_atapi_read_patch(s->lba, s->io_buffer +
+                             (s->cd_sector_size == 2352 ? 16 : 0), 1);
+    }
     if (s->cd_sector_size == 2352) {
         cd_data_to_raw(s->io_buffer, s->lba);
     }
@@ -340,9 +351,15 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
         if (s->lba != -1) {
             if (s->cd_sector_size == 2352) {
                 n = 1;
+                if (ide_atapi_read_patch) {
+                    ide_atapi_read_patch(s->lba, s->io_buffer + 16, 1);
+                }
                 cd_data_to_raw(s->io_buffer, s->lba);
             } else {
                 n = s->io_buffer_size >> 11;
+                if (ide_atapi_read_patch) {
+                    ide_atapi_read_patch(s->lba, s->io_buffer, n);
+                }
             }
             s->lba += n;
         }
@@ -1056,7 +1073,7 @@ static void cmd_read_disc_information(IDEState *s, uint8_t* buf)
 static void cmd_read_dvd_structure(IDEState *s, uint8_t* buf)
 {
     int max_len;
-    int media = buf[1];
+    int media = 0;
     int format = buf[7];
     int ret;
 

@@ -64,6 +64,8 @@
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/xen.h"
+#include "system/tcg.h"
+#include "exec/tb-flush.h"
 #include "migration/colo.h"
 #include "qemu/bitmap.h"
 #include "net/announce.h"
@@ -3057,6 +3059,10 @@ bool load_snapshot(const char *name, const char *vmstate,
     }
     ret = qemu_loadvm_state(f, errp);
     migration_incoming_state_destroy();
+
+    if (tcg_enabled() && !runstate_check(RUN_STATE_RESTORE_VM)) {
+        tb_flush__exclusive_or_serial();
+    }
 
     bdrv_drain_all_end();
 

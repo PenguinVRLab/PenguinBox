@@ -38,14 +38,18 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
                            v * MCPX_HW_NOTIFIER_COUNT + notifier);
     notify_offset += 15;
 
-    stb_phys(&address_space_memory, notify_offset, status);
+    apu_stb_phys(d, notify_offset, status);
 
-    stb_phys(&address_space_memory, notify_offset - 1, 1);
+    apu_stb_phys(d, notify_offset - 1, 1);
 
     qatomic_or(&d->regs[NV_PAPU_ISTS],
               NV_PAPU_ISTS_FEVINTSTS | NV_PAPU_ISTS_FENINTSTS);
     d->set_irq = true;
 }
+
+static int g_apu_src_mono;
+static int g_apu_src_conv = SRC_SINC_FASTEST;
+static bool g_apu_src_bypass1;
 
 static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
 {
@@ -55,6 +59,7 @@ static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
     if (d->vp.filters[v].resampler) {
         src_reset(d->vp.filters[v].resampler);
     }
+    d->vp.filters[v].bypassing = false;
 }
 
 static bool voice_should_mute(uint16_t v)
@@ -97,7 +102,7 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
                                hwaddr offset, uint32_t mask)
 {
     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
-    return (ldl_le_phys(&address_space_memory, voice + offset) & mask) >>
+    return (apu_ldl_le_phys(d, voice + offset) & mask) >>
            ctz32(mask);
 }
 
@@ -106,8 +111,8 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
 {
     hwaddr voice = d->regs[NV_PAPU_VPVADDR]
                     + voice_handle * NV_PAVS_SIZE;
-    uint32_t v = ldl_le_phys(&address_space_memory, voice + offset) & ~mask;
-    stl_le_phys(&address_space_memory, voice + offset,
+    uint32_t v = apu_ldl_le_phys(d, voice + offset) & ~mask;
+    apu_stl_le_phys(d, voice + offset,
                 v | ((val << ctz32(mask)) & mask));
 }
 
@@ -425,7 +430,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     case NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET: {
         hwaddr sge_address =
             d->regs[NV_PAPU_VPSGEADDR] + d->vp.inbuf_sge_handle * 8;
-        stl_le_phys(&address_space_memory, sge_address,
+        apu_stl_le_phys(d, sge_address,
                     argument &
                         NV1BA0_PIO_SET_CURRENT_INBUF_SGE_OFFSET_PARAMETER);
         DPRINTF("Wrote inbuf SGE[0x%X] = 0x%08X\n", d->vp.inbuf_sge_handle,
@@ -451,7 +456,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     case NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET: {
         hwaddr sge_address =
             d->regs[NV_PAPU_VPSGEADDR] + d->vp.outbuf_sge_handle * 8;
-        stl_le_phys(&address_space_memory, sge_address,
+        apu_stl_le_phys(d, sge_address,
                     argument &
                         NV1BA0_PIO_SET_CURRENT_OUTBUF_SGE_OFFSET_PARAMETER);
         DPRINTF("Wrote outbuf SGE[0x%X] = 0x%08X\n", d->vp.outbuf_sge_handle,
@@ -496,7 +501,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         hwaddr addr = d->regs[NV_PAPU_VPSSLADDR]
                       + (d->vp.ssl_base_page * 8)
                       + (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET);
-        stl_le_phys(&address_space_memory, addr, argument);
+        apu_stl_le_phys(d, addr, argument);
         DPRINTF("  ssl_segment[%x + %x].%s = %x\n",
             d->vp.ssl_base_page,
             (method - NV1BA0_PIO_SET_SSL_SEGMENT_OFFSET)/8,
@@ -625,12 +630,12 @@ const MemoryRegionOps vp_ops = {
     .write = vp_write,
 };
 
-static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
+static hwaddr get_data_ptr(MCPXAPUState *d, hwaddr sge_base, unsigned int max_sge, uint32_t addr)
 {
     unsigned int entry = addr / TARGET_PAGE_SIZE;
     assert(entry <= max_sge);
     uint32_t prd_address =
-        ldl_le_phys(&address_space_memory, sge_base + entry * 4 * 2);
+        apu_ldl_le_phys(d, sge_base + entry * 4 * 2);
     DPRINTF("Addr: 0x%08X, control: 0x%08X\n", prd_address, prd_control);
     return prd_address + addr % TARGET_PAGE_SIZE;
 }
@@ -889,8 +894,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         }
 
         hwaddr addr = d->regs[NV_PAPU_VPSSLADDR] + page * 8;
-        segment_offset = ldl_le_phys(&address_space_memory, addr);
-        segment_length = ldl_le_phys(&address_space_memory, addr + 4);
+        segment_offset = apu_ldl_le_phys(d, addr);
+        segment_length = apu_ldl_le_phys(d, addr + 4);
         assert(segment_offset != 0);
         assert(segment_length != 0);
         seg_len = (segment_length >> 0) & 0xffff;
@@ -959,10 +964,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                     linear_addr += ba;
                     for (unsigned int word_index = 0;
                          word_index < (9 * samples_per_block); word_index++) {
-                        hwaddr addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR],
+                        hwaddr addr = get_data_ptr(d, d->regs[NV_PAPU_VPSGEADDR],
                                                    0xFFFFFFFF, linear_addr);
                         adpcm_block[word_index] =
-                            ldl_le_phys(&address_space_memory, addr);
+                            apu_ldl_le_phys(d, addr);
                         linear_addr += 4;
                     }
                 }
@@ -984,7 +989,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 addr = segment_offset + cbo * block_size;
             } else {
                 uint32_t linear_addr = ba + cbo * block_size;
-                addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR], 0xFFFFFFFF,
+                addr = get_data_ptr(d, d->regs[NV_PAPU_VPSGEADDR], 0xFFFFFFFF,
                                     linear_addr);
             }
 
@@ -993,19 +998,19 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 float fval;
                 switch (sample_size) {
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_U8:
-                    ival = ldub_phys(&address_space_memory, addr);
+                    ival = apu_ld_phys(d, addr, 1);
                     fval = uint8_to_float(ival & 0xff);
                     break;
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16:
-                    ival = lduw_le_phys(&address_space_memory, addr);
+                    ival = apu_ld_phys(d, addr, 2);
                     fval = int16_to_float(ival & 0xffff);
                     break;
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24:
-                    ival = ldl_le_phys(&address_space_memory, addr);
+                    ival = apu_ldl_le_phys(d, addr);
                     fval = int24_to_float(ival);
                     break;
                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S32:
-                    ival = ldl_le_phys(&address_space_memory, addr);
+                    ival = apu_ldl_le_phys(d, addr);
                     fval = int32_to_float(ival);
                     break;
                 default:
@@ -1085,26 +1090,84 @@ static long voice_resample_callback(void *cb_data, float **data)
     return sample_count;
 }
 
+static long voice_resample_callback_mono(void *cb_data, float **data)
+{
+    MCPXAPUVoiceFilter *filter = cb_data;
+    float *st;
+    long n = voice_resample_callback(cb_data, &st);
+    for (long i = 0; i < n; i++) {
+        filter->resample_buf_mono[i] = st[2 * i];
+    }
+    *data = filter->resample_buf_mono;
+    return n;
+}
+
+
 static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
-                          int requested_num, float rate)
+                          int requested_num, float rate, bool stereo)
 {
     assert(v < MCPX_HW_MAX_VOICES);
     MCPXAPUVoiceFilter *filter = &d->vp.filters[v];
+
+    int want_ch = (g_apu_src_mono && !stereo) ? 1 : 2;
+    if (filter->resampler && filter->resampler_ch != want_ch) {
+        src_delete(filter->resampler);
+        filter->resampler = NULL;
+    }
+    if (filter->resampler == NULL && want_ch == 1) {
+        filter->voice = v;
+        int err;
+        filter->resampler = src_callback_new(&voice_resample_callback_mono, g_apu_src_conv, 1, &err, filter);
+        if (filter->resampler == NULL) {
+            fprintf(stderr, "src error: %s\n", src_strerror(err));
+            assert(0);
+        }
+        filter->resampler_ch = 1;
+    }
+
+    if (g_apu_src_bypass1) {
+        if (rate == 1.0f && requested_num == NUM_SAMPLES_PER_FRAME) {
+            float *st;
+            if (!filter->bypassing && filter->resampler) {
+                src_reset(filter->resampler);
+            }
+            filter->voice = v;
+            filter->bypassing = true;
+            long n = voice_resample_callback(filter, &st);
+            memcpy(samples, st, sizeof(float) * 2 * n);
+            return n;
+        }
+        if (filter->bypassing && filter->resampler) {
+            src_reset(filter->resampler);
+        }
+        filter->bypassing = false;
+    }
 
     if (filter->resampler == NULL) {
         filter->voice = v;
         int err;
 
         filter->resampler = src_callback_new(&voice_resample_callback,
-                                           SRC_SINC_FASTEST, 2, &err, filter);
+                                           g_apu_src_conv, 2, &err, filter);
         if (filter->resampler == NULL) {
             fprintf(stderr, "src error: %s\n", src_strerror(err));
             assert(0);
         }
+        filter->resampler_ch = 2;
     }
 
-    int count = src_callback_read(filter->resampler, rate, requested_num,
-                                  (float *)samples);
+    int count;
+    if (filter->resampler_ch == 1) {
+        float mono[NUM_SAMPLES_PER_FRAME];
+        count = src_callback_read(filter->resampler, rate, requested_num, mono);
+        for (int i = 0; i < count; i++) {
+            samples[i][0] = mono[i];
+            samples[i][1] = mono[i];
+        }
+    } else {
+        count = src_callback_read(filter->resampler, rate, requested_num, (float *)samples);
+    }
+
     if (count == -1) {
         DPRINTF("resample error\n");
     }
@@ -1267,7 +1330,7 @@ static void voice_process(MCPXAPUState *d,
             }
             int count =
                 voice_resample(d, v, &samples[sample_count],
-                               NUM_SAMPLES_PER_FRAME - sample_count, rate);
+                               NUM_SAMPLES_PER_FRAME - sample_count, rate, stereo);
             if (count < 0) {
                 break;
             }
@@ -1628,6 +1691,7 @@ voice_work_dispatch(MCPXAPUState *d,
         voice_work_schedule(d);
         qemu_cond_broadcast(&vwd->work_pending);
         qemu_cond_wait(&vwd->work_finished, &vwd->lock);
+
         assert(!vwd->workers_pending);
         vwd->queue_len = 0;
 
@@ -1644,12 +1708,59 @@ voice_work_dispatch(MCPXAPUState *d,
     qemu_mutex_unlock(&vwd->lock);
 }
 
+
+static void voice_src_probe(void)
+{
+    static const struct { const char *name; int conv; } convs[] = {
+        { "sinc_fastest", SRC_SINC_FASTEST }, { "sinc_medium", SRC_SINC_MEDIUM_QUALITY },
+        { "sinc_best", SRC_SINC_BEST_QUALITY }, { "linear", SRC_LINEAR }, { "zero_order", SRC_ZERO_ORDER_HOLD },
+    };
+    const char *m = getenv("XEMU_APU_SRC_MONO");
+    g_apu_src_mono = (m && *m) ? atoi(m) : 0;
+    if (g_apu_src_mono < 0 || g_apu_src_mono > 2) {
+        g_apu_src_mono = 0;
+    }
+    const char *c = getenv("XEMU_APU_SRC");
+    const char *name = "sinc_fastest";
+    if (c && *c) {
+        if (!strcmp(c, "bypass1")) {
+            g_apu_src_bypass1 = true;
+            name = c;
+        } else {
+            for (int i = 0; i < ARRAY_SIZE(convs); i++) {
+                if (!strcmp(c, convs[i].name)) {
+                    g_apu_src_conv = convs[i].conv;
+                    name = convs[i].name;
+                }
+            }
+        }
+    }
+    bool src_check = g_apu_src_mono == 2;
+    if (src_check) {
+        g_apu_src_mono = 1;
+    }
+    fprintf(stderr, "apu-src-mono: %s\n", g_apu_src_mono == 2 ? "ON (=2: every mono read compared with the stock "
+            "stereo resampler by output index)" : g_apu_src_mono ? "ON (mono voices through a one-channel resampler)"
+            : "OFF");
+    bool stock = g_apu_src_conv == SRC_SINC_FASTEST && !g_apu_src_bypass1;
+    fprintf(stderr, "apu-src: %s%s\n", name, stock ? " (stock)" : " (APPROXIMATION: the voices sound different)");
+}
+
 static void voice_work_init(MCPXAPUState *d)
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
+    voice_src_probe();
+
     int num_workers = g_config.audio.vp.num_workers ?: SDL_GetNumLogicalCPUCores();
+    const char *wenv = getenv("XEMU_APU_WORKERS");
+    if (wenv && atoi(wenv) > 0) {
+        num_workers = atoi(wenv);
+    }
     vwd->num_workers = MAX(1, MIN(num_workers, MAX_VOICE_WORKERS));
+    fprintf(stderr, "apu-workers: %d%s\n", vwd->num_workers,
+            (wenv && atoi(wenv) > 0) ? " (XEMU_APU_WORKERS)" :
+            g_config.audio.vp.num_workers ? " (audio.vp.num_workers)" : " (auto: logical CPUs, at most 16)");
     vwd->workers = g_malloc0_n(vwd->num_workers, sizeof(VoiceWorker));
     vwd->workers_should_exit = false;
     vwd->workers_pending = 0;

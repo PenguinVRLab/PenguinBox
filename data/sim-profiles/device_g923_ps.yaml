@@ -1,0 +1,59 @@
+# Logitech G923 Racing Wheel, PlayStation/PC version: the wheel itself (the pedals are device_g923_pedals).
+# Art: devices/art/g923_ps.svg, an original schematic (docs/decisions.md S-21); shares every position with
+# g923_xbox.svg, which leaves out this version's extra controls (L3/R3, +/-, the dial and Enter).
+# USB IDs, both READ OFF THE OWNER'S UNIT on the rig 2026-10-10 (work/0023 step 1;
+# tests/fixtures/udev/rig_2026-10-10_g923.txt): 046d:c266 in PC mode (`match`) and 046d:c267 with the switch on
+# PS4 or PS5 (`match_also`), on the same port path (the wheel has three modes: PC, PS4, PS5). PC mode gives 4 axes
+# (X, Y, Z, RZ), a hat and 25 buttons. PS4 and PS5 mode share 046d:c267 and give Linux the SAME controls (6 eight-bit
+# axes X Y Z RX RY RZ, a hat, 14 buttons 304-317): their HID descriptors differ (PS4 a DualShock 4 layout, PS5 a
+# DualSense one; tests/fixtures/udev/rig_2026-10-10_g923_modes.txt) only in field order and vendor fields that
+# hid-generic does not map, so the app cannot tell PS4 from PS5 and the row says "PS4 or PS5". The wheel's extras sit
+# in those vendor fields, so the shifter is not seen in either PlayStation mode.
+# On Linux use PC mode. No force feedback either way on the rig's kernel (hid-generic; capabilities/ff=0).
+# Positions checked by eye against the owner's photo of the wheel face (2026-10-10, not in the repo): the D-pad and
+# face buttons on the upper wings, L2/R2 beside the hub, L3/R3 lower and further out, the +/- rocker lower left,
+# the dial with Enter lower right, and Share, Options and the PS button stacked down the lower spoke. The ids
+# predate the photo: hub_upper_left/right and hub_bottom now sit on the lower spoke, and L2 (spoke_*_lower) is the
+# UPPER of the two spoke buttons, L3 (spoke_*_inner) the lower, outer one. Ids are kept; the labels name the control.
+# The Driving Force shifter and the pedals plug into this wheel base. On the rig (2026-10-10) the wheel is ONE input
+# node with ABS_X, Y, Z, RZ and a hat and no other Logitech node (OBSERVED), so the pedals are axes of THIS device;
+# which axis is which pedal is not read yet. The separate profiles exist for their own art.
+schema: sim-profile/1
+kind: device
+id: g923_ps
+name: "Logitech G923 for PlayStation and PC"
+source: sdl_joystick
+match: { vid: 0x046d, pid: 0xc266, mode: "PC mode" }
+match_also:
+  - { vid: 0x046d, pid: 0xc267, mode: "PS4 or PS5 mode: no shifter; use PC mode" }
+art: devices/art/g923_ps.svg
+# Input ids name a control's position or function; the real button and axis codes are captured on
+# the owner's hardware with press-to-identify (work/0009, work/0010), and the descriptor ranges are
+# placeholders until then. Anchors are points in the art's viewBox.
+inputs:
+  # Wheel and paddles
+  - { id: steering, kind: axis, min: -32768, rest: 0, max: 32767, anchor: [300, 45], label: "Steering wheel" }
+  - { id: paddle_left, kind: button, anchor: [164, 160], label: "Left paddle (shift down)" }
+  - { id: paddle_right, kind: button, anchor: [436, 160], label: "Right paddle (shift up)" }
+  # Shared by both versions; labels are this version's legends
+  - { id: dpad, kind: hat, anchor: [210, 210], label: "D-pad" }
+  - { id: face_top, kind: button, anchor: [390, 193], label: "Triangle" }
+  - { id: face_left, kind: button, anchor: [371, 212], label: "Square" }
+  - { id: face_right, kind: button, anchor: [409, 212], label: "Circle" }
+  - { id: face_bottom, kind: button, anchor: [390, 231], label: "Cross" }
+  - { id: hub_upper_left, kind: button, anchor: [300, 342], label: "Share" }
+  - { id: hub_upper_right, kind: button, anchor: [300, 358], label: "Options" }
+  - { id: spoke_left_lower, kind: button, anchor: [220, 268], label: "L2" }
+  - { id: spoke_right_lower, kind: button, anchor: [380, 268], label: "R2" }
+  - { id: hub_bottom, kind: button, anchor: [300, 375], label: "PS button" }
+  # PlayStation version only
+  - { id: spoke_left_inner, kind: button, anchor: [186, 304], label: "L3" }
+  - { id: spoke_right_inner, kind: button, anchor: [414, 304], label: "R3" }
+  - { id: minus, kind: button, anchor: [240, 332], label: "Minus" }
+  - { id: plus, kind: button, anchor: [240, 312], label: "Plus" }
+  - { id: dial_ccw, kind: button, anchor: [338, 322], label: "Dial, turned left" }
+  - { id: dial_cw, kind: button, anchor: [382, 322], label: "Dial, turned right" }
+  - { id: dial_enter, kind: button, anchor: [360, 322], label: "Enter" }
+outputs:
+  # Force feedback. gain and clamp are conservative starting values, not tuned (brief section 8).
+  - { transport: sdl_haptic, effects: [constant, spring], gain: 0.35, clamp: 0.8, invert: false }

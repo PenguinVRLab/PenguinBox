@@ -1,0 +1,11 @@
+# BAD fixture (work/0039): device_shifter.yaml with one change: positions is not a list. Load the good set with this file IN PLACE OF
+# device_shifter.yaml; it must be refused with DETENT_POSITIONS.
+schema: sim-profile/1
+kind: device
+id: th8a
+source: sdl_joystick
+template: shifter_v1
+inputs:
+- id: gate
+  kind: detent
+  positions: n123456r

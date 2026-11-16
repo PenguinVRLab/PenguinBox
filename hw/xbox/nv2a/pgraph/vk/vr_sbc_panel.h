@@ -32,6 +32,13 @@ const VrSbcPanelCell *vr_sbc_panel_cells(size_t *count);
 
 void vr_sbc_panel_inject(const char *cell_id, bool pressed);
 
+void vr_sbc_panel_gloves_init(void);
+
+bool vr_sbc_panel_key_injected(int scancode);
+
+void vr_sbc_panel_set_pointer(int hand, int px, int py, int cell,
+                              bool pressed);
+
 #ifdef __cplusplus
 }
 #endif

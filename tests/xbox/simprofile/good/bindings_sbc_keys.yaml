@@ -1,0 +1,15 @@
+# Keys onto the Steel Battalion controller's axes (S-74; docs/profile-schema.md 3, button -> axis). aiming_x stays where
+# it is left (the target file marks it `returns_to_rest: false`), so its keys carry a `rate` in full travels per second:
+# A and D move it, last pressed wins. rotation_lever and left_pedal spring back, so their keys carry a `value` (canonical:
+# -1..1 for the bipolar lever, 0..1 for the pedal) and the lever's key an optional ramp.
+schema: sim-profile/1
+kind: bindings
+id: sbc_keys
+device: keyboard_104
+target: steel_battalion
+bind:
+  - { source: key_a, target: aiming_x, rate: -0.5 }
+  - { source: key_d, target: aiming_x, rate: 0.5 }
+  - { source: key_q, target: rotation_lever, value: -1.0, ramp: { press_ms: 150, release_ms: 100 } }
+  - { source: key_e, target: rotation_lever, value: 1.0, ramp: { press_ms: 150, release_ms: 100 } }
+  - { source: key_w, target: left_pedal, value: 1.0 }

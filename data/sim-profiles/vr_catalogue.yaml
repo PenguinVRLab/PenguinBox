@@ -1,0 +1,52 @@
+# The spatial-controls device catalogue: virtual VR controllers as SOURCES.
+# Transcribed from the framework's spatial-controls doc, section 3 (3.1-3.6). Axes are
+# [-1,+1] bipolar unless the doc marks them [0,1]. Renaming a control is a breaking change there, so
+# it is here too: this file must follow doc 31, never lead it.
+# `polarity_param` names an instance param that flips an axis between bipolar and unipolar
+# (Throttle.Throttle is [0,1] when oneWay, else [-1,+1]).
+# `repeat` marks controls that exist once per notch/gear; their ids are given by a param.
+schema: sim-profile/1
+kind: vr_catalogue
+devices:
+  Throttle:
+    controls:
+      - { id: Throttle, kind: axis, polarity_param: oneWay }
+      - { id: Notch, kind: button, repeat: detented }
+      - { id: Grabbed, kind: button }
+  TwinThrottles:
+    controls:
+      - { id: LeftLever,  kind: axis, range: bipolar }
+      - { id: RightLever, kind: axis, range: bipolar }
+      # doc 31 3.2: negative power emits Power = 0, so Power is [0,1]
+      - { id: Power, kind: axis, range: unipolar }
+      - { id: Steer, kind: axis, range: bipolar }
+      - { id: GrabbedLeft,  kind: button }
+      - { id: GrabbedRight, kind: button }
+  Wheel:
+    controls:
+      - { id: Steering, kind: axis, range: bipolar }
+      - { id: GrabbedLeft,  kind: button }
+      - { id: GrabbedRight, kind: button }
+  Shifter:
+    controls:
+      - { id: Gear, kind: button, repeat: gears }
+      - { id: GearR, kind: button }
+      - { id: GearN, kind: button }
+      - { id: ShiftUp, kind: button }
+      - { id: ShiftDown, kind: button }
+  Stick:
+    controls:
+      - { id: X, kind: axis, range: bipolar }
+      - { id: Y, kind: axis, range: bipolar }
+      - { id: Twist, kind: axis, range: bipolar }
+      - { id: Trigger, kind: axis, range: unipolar }
+      - { id: Grabbed, kind: button }
+  LightGun:
+    controls:
+      - { id: PointerX, kind: axis, range: bipolar }
+      - { id: PointerY, kind: axis, range: bipolar }
+      - { id: OnScreen, kind: button }
+      - { id: Trigger, kind: button }
+      - { id: A, kind: button }
+      - { id: B, kind: button }
+      - { id: Grabbed, kind: button }

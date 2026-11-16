@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "hw/xbox/nv2a/pgraph/vr_worldproj.h"
 #include <math.h>
 
 static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
@@ -243,11 +244,7 @@ void pgraph_vk_refresh_async_present_toggle(void)
         } else if (getenv("XEMU_ASYNC_PRESENT")) {
             forced = 1;
         } else {
-            forced = 2;
-            watch = getenv("XEMU_ASYNCPRESENT_TOGGLE_FILE");
-            if (!watch) {
-                watch = "/tmp/asyncpresent-on";
-            }
+            forced = 0;
         }
     }
     bool now_on = (forced == 1) ||
@@ -266,20 +263,42 @@ bool pgraph_vk_async_present_enabled(void)
     return g_async_present_enabled;
 }
 
+static bool present_dedup_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        if (getenv("XEMU_NO_PRESENT_DEDUP")) {
+            enabled = 0;
+        } else if (getenv("XEMU_PRESENT_DEDUP")) {
+            enabled = 1;
+        } else {
+            if (xemu_perf_title_state() == 0) {
+                return false;
+            }
+            enabled = xemu_perf_title_validated() ? 1 : 0;
+        }
+        fprintf(stderr,
+                "present-dedup: skip recomposite of an unchanged display "
+                "surface %s\n", enabled ? "ON" : "OFF");
+    }
+    return enabled;
+}
+
 static void create_descriptor_pool(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    const uint32_t eye_sets = pgraph_vk_stereo_on() ? 2 : 0;
     VkDescriptorPoolSize pool_sizes = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 2 * (1 + ASYNC_PRESENT_RING_SIZE),
+        .descriptorCount = 2 * (1 + ASYNC_PRESENT_RING_SIZE + eye_sets),
     };
 
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_sizes,
-        .maxSets = 1 + ASYNC_PRESENT_RING_SIZE,
+        .maxSets = 1 + ASYNC_PRESENT_RING_SIZE + eye_sets,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
     };
     VK_CHECK(vkCreateDescriptorPool(r->device, &pool_info, NULL,
@@ -344,6 +363,11 @@ static void create_descriptor_sets(PGRAPHState *pg)
     for (int i = 0; i < ASYNC_PRESENT_RING_SIZE; i++) {
         VK_CHECK(vkAllocateDescriptorSets(
             r->device, &alloc_info, &r->display.present_slots[i].desc_set));
+    }
+
+    for (int e = 0; pgraph_vk_stereo_on() && e < 2; e++) {
+        VK_CHECK(vkAllocateDescriptorSets(r->device, &alloc_info,
+                                          &r->display.eyes_desc[e]));
     }
 }
 
@@ -623,6 +647,8 @@ static void destroy_present_slot_image(PGRAPHState *pg, PresentSlot *slot)
     slot->height = 0;
 }
 
+static void destroy_eye_image(PGRAPHState *pg);
+
 static void destroy_current_display_image(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -636,6 +662,8 @@ static void destroy_current_display_image(PGRAPHState *pg)
     for (int i = 0; i < ASYNC_PRESENT_RING_SIZE; i++) {
         destroy_present_slot_image(pg, &d->present_slots[i]);
     }
+
+    destroy_eye_image(pg);
 
     destroy_frame_buffer(pg);
 
@@ -662,6 +690,82 @@ static void destroy_current_display_image(PGRAPHState *pg)
     d->memory = VK_NULL_HANDLE;
 
     d->draw_time = 0;
+
+    d->composited_valid = false;
+}
+
+static void destroy_eye_image(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+
+    if (d->eyes_image == VK_NULL_HANDLE) {
+        return;
+    }
+    for (int e = 0; e < 2; e++) {
+        vkDestroyFramebuffer(r->device, d->eyes_framebuffer[e], NULL);
+        d->eyes_framebuffer[e] = VK_NULL_HANDLE;
+        vkDestroyImageView(r->device, d->eyes_view[e], NULL);
+        d->eyes_view[e] = VK_NULL_HANDLE;
+    }
+    vmaDestroyImage(r->allocator, d->eyes_image, d->eyes_allocation);
+    d->eyes_image = VK_NULL_HANDLE;
+    d->eyes_allocation = VK_NULL_HANDLE;
+}
+
+static void create_eye_image(PGRAPHState *pg, int width, int height)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *d = &r->display;
+
+    VkImageCreateInfo image_create_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent.width = width,
+        .extent.height = height,
+        .extent.depth = 1,
+        .mipLevels = 1,
+        .arrayLayers = 2,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VmaAllocationCreateInfo alloc_create_info = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+    VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                            &alloc_create_info, &d->eyes_image,
+                            &d->eyes_allocation, NULL));
+
+    for (int e = 0; e < 2; e++) {
+        VkImageViewCreateInfo view_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = d->eyes_image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, e, 1 },
+        };
+        VK_CHECK(vkCreateImageView(r->device, &view_info, NULL,
+                                   &d->eyes_view[e]));
+        VkFramebufferCreateInfo fb_info = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = d->render_pass,
+            .attachmentCount = 1,
+            .pAttachments = &d->eyes_view[e],
+            .width = width,
+            .height = height,
+            .layers = 1,
+        };
+        VK_CHECK(vkCreateFramebuffer(r->device, &fb_info, NULL,
+                                     &d->eyes_framebuffer[e]));
+    }
+    fprintf(stderr, "vr-stereo: eye image %dx%d, 2 layers (layer e <- the "
+            "presented surface's layer e; the window image is unchanged)\n",
+            width, height);
 }
 
 static void create_display_image(PGRAPHState *pg, int width, int height)
@@ -808,6 +912,10 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
     d->height = image_create_info.extent.height;
 
     create_frame_buffer(pg);
+
+    if (pgraph_vk_stereo_on()) {
+        create_eye_image(pg, d->width, d->height);
+    }
 }
 
 static void create_present_slot_image(PGRAPHState *pg, PresentSlot *slot,
@@ -1004,8 +1112,8 @@ static bool ensure_present_slots(PGRAPHState *pg)
 #endif
 }
 
-static void update_descriptor_set_for(PGRAPHState *pg, SurfaceBinding *surface,
-                                      VkDescriptorSet dst_set)
+static void update_descriptor_set_view(PGRAPHState *pg, VkImageView view,
+                                       VkDescriptorSet dst_set)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
@@ -1014,7 +1122,7 @@ static void update_descriptor_set_for(PGRAPHState *pg, SurfaceBinding *surface,
 
     image_infos[0] = (VkDescriptorImageInfo){
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .imageView = surface->image_view,
+        .imageView = view,
         .sampler = r->display.sampler,
     };
     descriptor_writes[0] = (VkWriteDescriptorSet){
@@ -1054,6 +1162,16 @@ static void update_descriptor_set_for(PGRAPHState *pg, SurfaceBinding *surface,
 
     vkUpdateDescriptorSets(r->device, ARRAY_SIZE(descriptor_writes),
                            descriptor_writes, 0, NULL);
+}
+
+static void update_descriptor_set_for(PGRAPHState *pg, SurfaceBinding *surface,
+                                      VkDescriptorSet dst_set)
+{
+    update_descriptor_set_view(pg,
+                               pgraph_vk_stereo_on() ?
+                                   pgraph_vk_stereo_display_view(surface) :
+                                   surface->image_view,
+                               dst_set);
 }
 
 static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
@@ -1282,6 +1400,83 @@ static void render_display_async(PGRAPHState *pg, SurfaceBinding *surface)
     disp->present_published_valid = true;
 
     disp->draw_time = surface->draw_time;
+    disp->composited_vram_addr = surface->vram_addr;
+    disp->composited_width = disp->width;
+    disp->composited_height = disp->height;
+    disp->composited_valid = true;
+}
+
+static void render_eye_images(PGRAPHState *pg, VkCommandBuffer cmd,
+                              SurfaceBinding *surface)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    PGRAPHVkDisplayState *disp = &r->display;
+
+    if (disp->eyes_image == VK_NULL_HANDLE) {
+        return;
+    }
+
+    VkImageMemoryBarrier to_attachment = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = disp->eyes_image,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 2 },
+    };
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                         NULL, 0, NULL, 1, &to_attachment);
+
+    for (int e = 0; e < 2; e++) {
+        VkRenderPassBeginInfo begin = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = disp->render_pass,
+            .framebuffer = disp->eyes_framebuffer[e],
+            .renderArea.extent.width = disp->width,
+            .renderArea.extent.height = disp->height,
+        };
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          disp->pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                disp->pipeline_layout, 0, 1,
+                                &disp->eyes_desc[e], 0, NULL);
+        VkViewport viewport = {
+            .width = disp->width,
+            .height = disp->height,
+            .minDepth = 0.0,
+            .maxDepth = 1.0,
+        };
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        VkRect2D scissor = {
+            .extent.width = disp->width,
+            .extent.height = disp->height,
+        };
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        vkCmdPushConstants(cmd, disp->pipeline_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           disp->display_frag->push_constants.total_size,
+                           disp->display_frag->push_constants.allocation);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    }
+
+    VkImageMemoryBarrier to_read = to_attachment;
+    to_read.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    to_read.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
+                            VK_ACCESS_SHADER_READ_BIT;
+    to_read.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &to_read);
 }
 
 static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
@@ -1292,7 +1487,8 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     disp->present_published_valid = false;
 
-    bool async_candidate = pgraph_vk_async_present_enabled();
+    bool async_candidate = pgraph_vk_async_present_enabled() &&
+                           !pgraph_vk_stereo_on();
     bool pvideo_state_fetched = false;
     if (async_candidate) {
         disp->pvideo.state = get_pvideo_state(pg);
@@ -1324,6 +1520,15 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     update_uniforms(pg, surface);
     update_descriptor_set(pg, surface);
+    const bool stereo = pgraph_vk_stereo_on() &&
+                        disp->eyes_image != VK_NULL_HANDLE;
+    if (stereo) {
+        for (int e = 0; e < 2; e++) {
+            update_descriptor_set_view(pg,
+                                       pgraph_vk_stereo_eye_view(surface, e),
+                                       disp->eyes_desc[e]);
+        }
+    }
 
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_YELLOW,
@@ -1391,6 +1596,10 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 #endif
 
+    if (stereo) {
+        render_eye_images(pg, cmd, surface);
+    }
+
     pgraph_vk_surface_transition(pg, cmd, surface,
                                  pgraph_vk_surface_rest_layout(surface));
 
@@ -1403,7 +1612,12 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     pgraph_vk_end_single_time_commands(pg, cmd);
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
 
+
     disp->draw_time = surface->draw_time;
+    disp->composited_vram_addr = surface->vram_addr;
+    disp->composited_width = disp->width;
+    disp->composited_height = disp->height;
+    disp->composited_valid = true;
 }
 
 static void create_surface_sampler(PGRAPHState *pg)
@@ -1508,6 +1722,7 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
         destroy_current_display_image(pg);
     }
 
+    pgraph_vk_stereo_finalize_display(pg);
     destroy_present_slots(pg);
     destroy_surface_sampler(pg);
     destroy_display_pipeline(pg);
@@ -1531,6 +1746,8 @@ void pgraph_vk_render_display(PGRAPHState *pg)
         return;
     }
 
+    vr_worldproj_present(surface->vram_addr);
+
     unsigned int width = 0, height = 0;
     d->vga.get_resolution(&d->vga, (int *)&width, (int *)&height);
 
@@ -1543,6 +1760,20 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     PGRAPHVkDisplayState *disp = &r->display;
     if (!disp->image || disp->width != width || disp->height != height) {
         create_display_image(pg, width, height);
+    }
+
+    if (pgraph_vk_stereo_on() && pgraph_vk_stereo_mirror_changed()) {
+        disp->composited_valid = false;
+    }
+
+    if (present_dedup_enabled() && disp->composited_valid &&
+        disp->composited_vram_addr == surface->vram_addr &&
+        disp->composited_width == (int)width &&
+        disp->composited_height == (int)height &&
+        disp->draw_time == (int)surface->draw_time &&
+        !surface->upload_pending && !get_pvideo_state(pg).enabled) {
+        nv2a_profile_inc_counter(NV2A_PROF_PRESENT_DEDUP_SKIP);
+        return;
     }
 
     render_display(pg, surface);

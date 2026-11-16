@@ -1,0 +1,144 @@
+# PadXR merge vectors, pcsx2-VR (framework doc 101 §2.4 and §7; owner decision doc 109 Q2: shared test vectors now).
+# UNTESTED IN GAME: these are the rules' expected bytes, replayed by tests/ctest/core/vr_padxr_tests.cpp
+# (VRPadXRVectors.ReplayEveryRow). Another core replays the same rows with its own merge code.
+# Expected values were computed from the doc's rules by a separate reference, not by the C++ under test.
+# Rows (hex without 0x, active-low DS2 button word, bits as PadDualshock2::Poll numbers them):
+#   stick,REAL,MODE,VALUE,EXPECT        MODE add|set|own|none; add = REAL + round(VALUE*127) saturated;
+#                                       set/own = round((VALUE+1)*127.5) (-1 = 00, 0 = 80, +1 = FF)
+#   stickcell,REAL,WRITES,EXPECT        WRITES = MODE:VALUE joined by '+', in arming order; own > set > add > real,
+#                                       the first own/set keeps the cell, adds sum then saturate
+#   word,REAL,PRESS,OWNMASK,OWNDOWN,EXPECT   the player wins: a press only clears a bit; an owned bit takes the owner's value
+#   claim,A,B,COMPATIBLE                 one resource, two claims: none|shared|tee|exclusive|add|set|own
+#   edge,OPS,EXPECT                      OPS ';'-joined: pBIT:COUNT = press BIT for COUNT transactions, s = one transaction;
+#                                       EXPECT = the down mask of each s in order, ';'-joined (release-first on a re-press)
+stick,00,add,0.0,00
+stick,00,add,0.25,20
+stick,00,add,-0.25,00
+stick,00,add,1.0,7F
+stick,00,add,-1.0,00
+stick,00,add,0.003937007874015748,01
+stick,00,add,-0.003937007874015748,00
+stick,01,add,0.0,01
+stick,01,add,0.25,21
+stick,01,add,-0.25,00
+stick,01,add,1.0,80
+stick,01,add,-1.0,00
+stick,01,add,0.003937007874015748,02
+stick,01,add,-0.003937007874015748,00
+stick,7F,add,0.0,7F
+stick,7F,add,0.25,9F
+stick,7F,add,-0.25,5F
+stick,7F,add,1.0,FE
+stick,7F,add,-1.0,00
+stick,7F,add,0.003937007874015748,80
+stick,7F,add,-0.003937007874015748,7E
+stick,80,add,0.0,80
+stick,80,add,0.25,A0
+stick,80,add,-0.25,60
+stick,80,add,1.0,FF
+stick,80,add,-1.0,01
+stick,80,add,0.003937007874015748,81
+stick,80,add,-0.003937007874015748,7F
+stick,FE,add,0.0,FE
+stick,FE,add,0.25,FF
+stick,FE,add,-0.25,DE
+stick,FE,add,1.0,FF
+stick,FE,add,-1.0,7F
+stick,FE,add,0.003937007874015748,FF
+stick,FE,add,-0.003937007874015748,FD
+stick,FF,add,0.0,FF
+stick,FF,add,0.25,FF
+stick,FF,add,-0.25,DF
+stick,FF,add,1.0,FF
+stick,FF,add,-1.0,80
+stick,FF,add,0.003937007874015748,FF
+stick,FF,add,-0.003937007874015748,FE
+stick,40,add,0.0,40
+stick,40,add,0.25,60
+stick,40,add,-0.25,20
+stick,40,add,1.0,BF
+stick,40,add,-1.0,00
+stick,40,add,0.003937007874015748,41
+stick,40,add,-0.003937007874015748,3F
+stick,40,set,-1.0,00
+stick,40,set,-0.5,40
+stick,40,set,0.0,80
+stick,40,set,0.5,BF
+stick,40,set,1.0,FF
+stick,40,own,-1.0,00
+stick,40,own,-0.5,40
+stick,40,own,0.0,80
+stick,40,own,0.5,BF
+stick,40,own,1.0,FF
+stick,40,none,1.0,40
+stickcell,33,add:0.1+add:0.1,4D
+stickcell,33,add:1.0+add:1.0,FF
+stickcell,33,add:0.1+set:-1.0,00
+stickcell,33,set:-1.0+own:1.0,FF
+stickcell,33,own:1.0+own:-1.0,FF
+stickcell,33,set:0.5+set:-0.5,BF
+stickcell,80,add:-1.0+add:-1.0,00
+word,FFFF,0000,0000,0000,FFFF
+word,FFBF,0080,0000,0000,FF3F
+word,FFBF,0040,0000,0000,FFBF
+word,FFFF,0840,0000,0000,F7BF
+word,FFBF,0000,0040,0000,FFFF
+word,FFFF,0000,0840,0800,F7FF
+word,FFB7,0080,0008,0000,FF3F
+word,0000,0000,FFFF,0000,FFFF
+word,FFFF,0000,FFFF,FFFF,0000
+claim,none,none,1
+claim,none,shared,1
+claim,none,tee,1
+claim,none,exclusive,1
+claim,none,add,1
+claim,none,set,1
+claim,none,own,1
+claim,shared,none,1
+claim,shared,shared,1
+claim,shared,tee,1
+claim,shared,exclusive,0
+claim,shared,add,1
+claim,shared,set,1
+claim,shared,own,1
+claim,tee,none,1
+claim,tee,shared,1
+claim,tee,tee,1
+claim,tee,exclusive,0
+claim,tee,add,1
+claim,tee,set,1
+claim,tee,own,1
+claim,exclusive,none,1
+claim,exclusive,shared,0
+claim,exclusive,tee,0
+claim,exclusive,exclusive,0
+claim,exclusive,add,0
+claim,exclusive,set,0
+claim,exclusive,own,0
+claim,add,none,1
+claim,add,shared,1
+claim,add,tee,1
+claim,add,exclusive,0
+claim,add,add,1
+claim,add,set,1
+claim,add,own,1
+claim,set,none,1
+claim,set,shared,1
+claim,set,tee,1
+claim,set,exclusive,0
+claim,set,add,1
+claim,set,set,1
+claim,set,own,1
+claim,own,none,1
+claim,own,shared,1
+claim,own,tee,1
+claim,own,exclusive,0
+claim,own,add,1
+claim,own,set,1
+claim,own,own,0
+edge,s;p6:2;s;s;s,0000;0040;0040;0000
+edge,p6:1;s;p6:1;s;s;s,0040;0000;0040;0000
+edge,p6:1;s;p6:1;p7:1;s;s;s,0040;0080;0040;0000
+edge,p3:3;s;s;p3:1;s;s;s,0008;0008;0000;0008;0000
+edge,p6:1;s;s;p6:1;s;s,0040;0000;0040;0000
+edge,p6:2;s;p6:0;s;s,0040;0000;0000

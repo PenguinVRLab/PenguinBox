@@ -22,7 +22,7 @@
 #include "system/tcg.h"
 #include "qemu/plugin.h"
 #include "internal-common.h"
-#include "exec/xemu-guest-profile.h"
+#include "xemu-lookup-inline.h"
 
 bool tcg_allowed;
 
@@ -38,23 +38,7 @@ void tcg_cflags_set(CPUState *cpu, uint32_t flags)
 
 uint32_t curr_cflags(CPUState *cpu)
 {
-    uint32_t cflags = cpu->tcg_cflags;
-
-    if (unlikely(cpu->singlestep_enabled)) {
-        cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR | CF_SINGLE_STEP | 1;
-    } else if (qatomic_read(&one_insn_per_tb)) {
-        cflags |= CF_NO_GOTO_TB | 1;
-    } else if (qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN)) {
-        cflags |= CF_NO_GOTO_TB;
-    }
-
-#ifdef XBOX
-    if (unlikely(xemu_gp_enabled)) {
-        cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
-    }
-#endif
-
-    return cflags;
+    return curr_cflags_inline(cpu);
 }
 
 void cpu_loop_exit_noexc(CPUState *cpu)

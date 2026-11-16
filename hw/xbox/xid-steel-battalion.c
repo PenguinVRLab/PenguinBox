@@ -1,6 +1,7 @@
 /*
  * QEMU USB XID Devices
  *
+ * SPDX-FileCopyrightText: 2024 Fred Hallock (faha223) — created this file in xemu PR #1803
  * SPDX-FileCopyrightText: 2026 Patrick Carey
  * SPDX-License-Identifier: LGPL-2.0-or-later
  * 
@@ -23,6 +24,9 @@
  */
 
 #include "xid.h"
+#include "hw/xbox/nv2a/pgraph/vr_padxr.h"
+#include "hw/xbox/nv2a/pgraph/vk/vr_ui_panel.h"
+#include "xid-ui-gate.h"
 
 #ifdef DEBUG_XID
 #define DPRINTF printf
@@ -179,7 +183,22 @@ static const XIDDesc desc_xid_steel_battalion = {
 
 static void update_sbc_input(USBXIDSteelBattalionState *s)
 {
-    if (xemu_input_get_test_mode()) {
+    const XidUiGate gate = xid_ui_gate(xemu_input_get_test_mode(),
+                                       vr_ui_panel_owns_input());
+    if (gate == XID_UI_GATE_HOLD) {
+        return;
+    }
+    if (gate == XID_UI_GATE_NEUTRAL) {
+        s->in_state.dwButtons = 0;
+        s->in_state.bMoreButtons &= SBC_TOGGLE_BITS_HI;
+        s->in_state.sSightChangeX = 0;
+        s->in_state.sSightChangeY = 0;
+        s->in_state.bAimingX = 128;
+        s->in_state.bAimingY = 128;
+        s->in_state.sRotationLever = 0;
+        s->in_state.wLeftPedal = 0;
+        s->in_state.wMiddlePedal = 0;
+        s->in_state.wRightPedal = 0;
         return;
     }
 
@@ -189,26 +208,31 @@ static void update_sbc_input(USBXIDSteelBattalionState *s)
     }
     xemu_input_update_controller(state);
 
-    s->in_state.dwButtons = (uint32_t)(state->sbc.buttons & 0xFFFFFFFF);
-    s->in_state.bMoreButtons =
-        (uint8_t)((state->sbc.buttons >> 32) & 0x7F & ~SBC_TOGGLE_BITS_HI);
-    s->in_state.bMoreButtons |= state->sbc.toggleSwitches;
+    SteelBattalionState sbc = state->sbc;
+    vr_padxr_merge_sbc(s->device_index, &sbc.buttons, sbc.axis,
+                       SBC_AXIS__COUNT, &sbc.gearLever, &sbc.tunerDial,
+                       &sbc.toggleSwitches);
 
-    s->in_state.sSightChangeX = state->sbc.axis[SBC_AXIS_SIGHT_CHANGE_X];
-    s->in_state.sSightChangeY = state->sbc.axis[SBC_AXIS_SIGHT_CHANGE_Y];
+    s->in_state.dwButtons = (uint32_t)(sbc.buttons & 0xFFFFFFFF);
+    s->in_state.bMoreButtons =
+        (uint8_t)((sbc.buttons >> 32) & 0x7F & ~SBC_TOGGLE_BITS_HI);
+    s->in_state.bMoreButtons |= sbc.toggleSwitches;
+
+    s->in_state.sSightChangeX = sbc.axis[SBC_AXIS_SIGHT_CHANGE_X];
+    s->in_state.sSightChangeY = sbc.axis[SBC_AXIS_SIGHT_CHANGE_Y];
     s->in_state.bAimingX =
-        (uint8_t)(128 + (state->sbc.axis[SBC_AXIS_AIMING_X] /
+        (uint8_t)(128 + (sbc.axis[SBC_AXIS_AIMING_X] /
                          256));
     s->in_state.bAimingY =
-        (uint8_t)(128 + (state->sbc.axis[SBC_AXIS_AIMING_Y] /
+        (uint8_t)(128 + (sbc.axis[SBC_AXIS_AIMING_Y] /
                          256));
-    s->in_state.sRotationLever = state->sbc.axis[SBC_AXIS_ROTATION_LEVER];
-    s->in_state.wLeftPedal = (uint16_t)state->sbc.axis[SBC_AXIS_LEFT_PEDAL];
-    s->in_state.wMiddlePedal = (uint16_t)state->sbc.axis[SBC_AXIS_MIDDLE_PEDAL];
-    s->in_state.wRightPedal = (uint16_t)state->sbc.axis[SBC_AXIS_RIGHT_PEDAL];
+    s->in_state.sRotationLever = sbc.axis[SBC_AXIS_ROTATION_LEVER];
+    s->in_state.wLeftPedal = (uint16_t)sbc.axis[SBC_AXIS_LEFT_PEDAL];
+    s->in_state.wMiddlePedal = (uint16_t)sbc.axis[SBC_AXIS_MIDDLE_PEDAL];
+    s->in_state.wRightPedal = (uint16_t)sbc.axis[SBC_AXIS_RIGHT_PEDAL];
 
-    s->in_state.ucGearLever = state->sbc.gearLever;
-    s->in_state.ucTunerDial = state->sbc.tunerDial;
+    s->in_state.ucGearLever = sbc.gearLever;
+    s->in_state.ucTunerDial = sbc.tunerDial;
 }
 
 static void usb_xid_steel_battalion_handle_control(USBDevice *dev, USBPacket *p,

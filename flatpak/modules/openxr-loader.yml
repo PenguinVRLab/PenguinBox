@@ -1,0 +1,35 @@
+# The Khronos OpenXR loader, built as its own shared library.
+#
+# PenguinBox does not link the loader: at start it dlopen()s
+# libopenxr_loader.so.1, and the loader then finds the OpenXR runtime (WiVRn, or
+# the Monado built into this flatpak) through the user's active_runtime.json or
+# XR_RUNTIME_JSON. The loader is a separate work under its own licence
+# (Apache-2.0), installed as a separate file with its licence beside PenguinBox's.
+# Same SDK release as PenguinScreen2 carries (release-1.1.61).
+name: openxr-loader
+buildsystem: cmake-ninja
+builddir: true
+config-opts:
+  - -DCMAKE_BUILD_TYPE=Release
+  # a shared libopenxr_loader.so.1 (the SDK's default on Linux, pinned here)
+  - -DDYNAMIC_LOADER=ON
+  # the SDK's own copy of jsoncpp, compiled into the loader, not the runtime's
+  - -DBUILD_WITH_SYSTEM_JSONCPP=OFF
+  - -DBUILD_TESTS=OFF
+  - -DBUILD_API_LAYERS=OFF
+build-options:
+  strip: true
+sources:
+  - type: archive
+    url: https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.61.tar.gz
+    # tag release-1.1.61 = commit 5267613edf3d937e3d77556a106a65c2f82b25c6
+    sha256: d5e2773d282642e6e250bd10266f316fc3ff3b8602c83db009a1f434205998e6
+post-install:
+  - install -Dm644 ../LICENSE "${FLATPAK_DEST}/share/licenses/${FLATPAK_ID}/OPENXR-LOADER-LICENSE"
+  - mkdir -p "${FLATPAK_DEST}/share/penguinbox"
+  - echo release-1.1.61 > "${FLATPAK_DEST}/share/penguinbox/openxr-loader.version"
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/doc

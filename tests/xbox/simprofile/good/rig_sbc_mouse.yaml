@@ -1,0 +1,8 @@
+# Steel Battalion with a mouse on the aiming lever (work/0020). Title ID from xemu_vr ui/xemu-sim-profiles.c:107.
+schema: sim-profile/1
+kind: rig
+id: sb_mouse
+game: { title_id: 0x43430002, name: "Steel Battalion" }
+target: steel_battalion
+devices:
+  - { profile: desk_mouse, bindings: sb_mouse_aim }

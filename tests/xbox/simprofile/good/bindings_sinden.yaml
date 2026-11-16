@@ -1,0 +1,7 @@
+schema: sim-profile/1
+kind: bindings
+id: pedal_as_x
+device: sinden_pedal
+target: xbox_duke
+bind:
+  - { source: pedal, target: x }

@@ -45,6 +45,7 @@
 #include "accel/accel-cpu-ops.h"
 #include "accel/tcg/cpu-ops.h"
 #include "internal-common.h"
+#include "exec/xemu-tblookup.h"
 
 
 struct TCGState {
@@ -215,6 +216,7 @@ static void tcg_set_one_insn_per_tb(Object *obj, bool value, Error **errp)
     TCGState *s = TCG_STATE(obj);
     s->one_insn_per_tb = value;
     qatomic_set(&one_insn_per_tb, value);
+    xemu_fastptr_gate_close_all();
 }
 
 static int tcg_gdbstub_supported_sstep_flags(AccelState *as)

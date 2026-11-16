@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * Copyright (c) 2026 Patrick Carey
  *
  * This library is free software; you can redistribute it and/or
@@ -17,6 +19,8 @@
 #include "qemu/bswap.h"
 #include "cpu.h"
 #include "exec/cpu-common.h"
+#include <inttypes.h>
+#include "qemu/timer.h"
 #include "hw/core/cpu.h"
 #include "hw/xbox/nv2a/debug.h"
 #include "hw/xbox/xbox-game-hacks.h"
@@ -46,20 +50,18 @@ static int radar_skip_read_n(void)
     if (env_n < 0) {
         const char *e = getenv("XEMU_RADAR_SKIP_N");
         env_n = (e && atoi(e) > 0) ? atoi(e) : 0;
-        watch = getenv("XEMU_RADAR_SKIP_FILE");
-        if (!watch) {
-            watch = "/tmp/radar-skip-n";
-        }
     }
 
     int n = env_n;
-    FILE *f = fopen(watch, "r");
-    if (f) {
-        int v;
-        if (fscanf(f, "%d", &v) == 1) {
-            n = v;
+    if (watch) {
+        FILE *f = fopen(watch, "r");
+        if (f) {
+            int v;
+            if (fscanf(f, "%d", &v) == 1) {
+                n = v;
+            }
+            fclose(f);
         }
-        fclose(f);
     }
     return n;
 }
@@ -89,6 +91,36 @@ static int probe_title_is_sb(CPUState *cs)
         return -1;
     }
     return (title == SB_TITLE_ID) ? 1 : 0;
+}
+
+#define LOC_TITLE_ID 0x43430009u
+
+static void perf_title_probe_cb(CPUState *cs, run_on_cpu_data data)
+{
+    uint32_t magic, cert_va, title;
+
+    if (xemu_perf_title_state() != 0) {
+        return;
+    }
+    if (!read_guest_u32(cs, XBE_HDR_VADDR, &magic) || magic != XBE_MAGIC) {
+        return;
+    }
+    if (!read_guest_u32(cs, XBE_HDR_VADDR + XBE_HDR_CERT_OFF, &cert_va) ||
+        cert_va == 0) {
+        return;
+    }
+    if (!read_guest_u32(cs, cert_va + XBE_CERT_TITLEID_OFF, &title)) {
+        return;
+    }
+
+    bool validated = (title == SB_TITLE_ID || title == LOC_TITLE_ID);
+    xemu_perf_title_publish(validated);
+    fprintf(stderr, "perf-title: 0x%08x — measured performance paths %s\n",
+            title,
+            validated ? "ENABLED (validated title)"
+                      : "left at stock defaults (not validated on this title; "
+                        "set XEMU_SURF2TEX_EXT=1 / XEMU_PRESENT_DEDUP=1 etc. "
+                        "to opt in)");
 }
 
 static void radar_install_cb(CPUState *cs, run_on_cpu_data data)
@@ -123,9 +155,20 @@ static void radar_remove_cb(CPUState *cs, run_on_cpu_data data)
     }
 }
 
+
+
 void xbox_game_hacks_frame_tick(void)
 {
     int n = radar_skip_read_n();
+
+    if (xemu_perf_title_state() == 0) {
+        CPUState *cs_ = qemu_get_cpu(0);
+        if (cs_) {
+            async_safe_run_on_cpu(cs_, perf_title_probe_cb,
+                                  RUN_ON_CPU_NULL);
+        }
+    }
+
 
     static int last_n = INT_MIN;
     if (n != last_n) {

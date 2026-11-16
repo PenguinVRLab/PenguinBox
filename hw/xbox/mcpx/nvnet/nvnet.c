@@ -391,6 +391,15 @@ static bool nvnet_can_receive(NetClientState *nc)
     return can_rx;
 }
 
+static void nvnet_flush_rx_queue(NvNetState *s)
+{
+    NetClientState *nc = qemu_get_queue(s->nic);
+
+    if (nvnet_can_receive(nc)) {
+        qemu_flush_queued_packets(nc);
+    }
+}
+
 static ssize_t dma_packet_to_guest(NvNetState *s, const uint8_t *buf,
                                    size_t size)
 {
@@ -651,6 +660,7 @@ static void set_link_up(NvNetState *s)
 {
     update_regs_on_link_up(s);
     set_mii_intr_status(s, NVNET_MII_STATUS_LINKCHANGE);
+    nvnet_flush_rx_queue(s);
 }
 
 static void restart_autoneg(NvNetState *s)
@@ -860,6 +870,8 @@ static void nvnet_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         set_reg_ext(s, addr, val, size);
         break;
     }
+
+    nvnet_flush_rx_queue(s);
 }
 
 static const MemoryRegionOps nvnet_mmio_ops = {

@@ -1,0 +1,12 @@
+# BAD fixture (work/0039): rig_pgr2.yaml with one change: a rig with no devices. Load the good set with this file IN PLACE OF
+# rig_pgr2.yaml; it must be refused with DEVICES_REQUIRED.
+schema: sim-profile/1
+kind: rig
+id: pgr2_wheel_rig
+game:
+  title_id: 1
+  name: synthetic racing fixture
+target: xbox_duke
+devices: []
+outputs:
+  ffb: wheel

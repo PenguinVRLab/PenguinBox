@@ -20,7 +20,8 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
-#include "hw/xbox/nv2a/pgraph/phase_timers.h"
+#include "hw/xbox/nv2a/pgraph/vr_worldproj.h"
+#include "hw/xbox/nv2a/pgraph/vr_mods_glue.h"
 #include "qemu/main-loop.h"
 
 void nv2a_update_irq(NV2AState *d)
@@ -180,10 +181,31 @@ int nv2a_get_screen_off(void)
     return g_nv2a->vga.sr[VGA_SEQ_CLOCK_MODE] & VGA_SR01_SCREEN_OFF;
 }
 
+static bool s_vblank_raised_early;
+
+void nv2a_vblank_raise_early(void)
+{
+    NV2AState *d = g_nv2a;
+
+    assert(bql_locked());
+    if (!d) {
+        return;
+    }
+    d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
+    d->pcrtc.raster = 0;
+    nv2a_update_irq(d);
+    s_vblank_raised_early = true;
+}
+
 static void nv2a_vga_gfx_update(void *opaque)
 {
     VGACommonState *vga = opaque;
     vga->hw_ops->gfx_update(vga);
+
+    if (s_vblank_raised_early) {
+        s_vblank_raised_early = false;
+        return;
+    }
 
     NV2AState *d = container_of(vga, NV2AState, vga);
     d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
@@ -244,12 +266,7 @@ static void nv2a_lock_fifo(NV2AState *d)
     qemu_mutex_lock(&d->pfifo.lock);
     qemu_cond_broadcast(&d->pfifo.fifo_cond);
     bql_unlock();
-    bool pt = nv2a_phase_timers_on();
-    int64_t pt_t0 = pt ? nv2a_phase_now_ns() : 0;
     qemu_cond_wait(&d->pfifo.fifo_idle_cond, &d->pfifo.lock);
-    if (pt) {
-        nv2a_phase_add_fifo_wait(pt_t0);
-    }
     bql_lock();
     qemu_mutex_lock(&d->pgraph.lock);
 }
@@ -263,6 +280,8 @@ static void nv2a_unlock_fifo(NV2AState *d)
 
 static void nv2a_reset(NV2AState *d)
 {
+    vr_worldproj_invalidate();
+    vr_mods_machine_changed();
     nv2a_lock_fifo(d);
     bool halted = qatomic_read(&d->pfifo.halt);
     if (!halted) {
@@ -356,10 +375,12 @@ static void nv2a_reset_hold(Object *obj, ResetType type)
     nv2a_reset(s);
 }
 
+static bool nv2a_save_locked;
+
 static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
 {
     NV2AState *d = opaque;
-    if (state == RUN_STATE_SAVE_VM) {
+    if (state == RUN_STATE_SAVE_VM || state == RUN_STATE_FINISH_MIGRATE) {
         nv2a_lock_fifo(d);
         qatomic_set(&d->pfifo.halt, true);
         pgraph_pre_savevm_trigger(d);
@@ -368,6 +389,15 @@ static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
         pgraph_pre_savevm_wait(d);
         bql_lock();
         nv2a_lock_fifo(d);
+        nv2a_save_locked = true;
+    } else if (state == RUN_STATE_PAUSED) {
+        nv2a_lock_fifo(d);
+        qatomic_set(&d->pfifo.halt, true);
+        pgraph_pre_savevm_trigger(d);
+        nv2a_unlock_fifo(d);
+        bql_unlock();
+        pgraph_pre_savevm_wait(d);
+        bql_lock();
     } else if (state == RUN_STATE_RESTORE_VM) {
         nv2a_lock_fifo(d);
         qatomic_set(&d->pfifo.halt, true);
@@ -386,10 +416,27 @@ static void nv2a_vm_state_change(void *opaque, bool running, RunState state)
     }
 }
 
+static int nv2a_pre_save(void *opaque)
+{
+    NV2AState *d = opaque;
+    if (!nv2a_save_locked) {
+        if (!qatomic_read(&d->pfifo.halt)) {
+            fprintf(stderr, "nv2a: state saved with no SAVE_VM/FINISH_MIGRATE hook and the FIFO running; "
+                            "GPU surfaces not downloaded first may be stale in the saved RAM\n");
+        }
+        nv2a_lock_fifo(d);
+        nv2a_save_locked = true;
+    }
+    return 0;
+}
+
 static int nv2a_post_save(void *opaque)
 {
     NV2AState *d = opaque;
-    nv2a_unlock_fifo(d);
+    if (nv2a_save_locked) {
+        nv2a_save_locked = false;
+        nv2a_unlock_fifo(d);
+    }
     return 0;
 }
 
@@ -403,6 +450,8 @@ static int nv2a_pre_load(void *opaque)
 static int nv2a_post_load(void *opaque, int version_id)
 {
     NV2AState *d = opaque;
+    vr_worldproj_invalidate();
+    vr_mods_machine_changed();
     qatomic_set(&d->pgraph.flush_pending, true);
     nv2a_unlock_fifo(d);
     return 0;
@@ -421,6 +470,7 @@ static const VMStateDescription vmstate_nv2a = {
     .name = "nv2a",
     .version_id = 3,
     .minimum_version_id = 1,
+    .pre_save = nv2a_pre_save,
     .post_save = nv2a_post_save,
     .post_load = nv2a_post_load,
     .pre_load = nv2a_pre_load,

@@ -1,0 +1,27 @@
+# BAD fixture (work/0039): ports.yaml with one change: a port device with no device. Load the good set with this file IN PLACE OF
+# ports.yaml; it must be refused with PORT_DEVICE.
+schema: sim-profile/1
+kind: ports
+id: living_room
+ports:
+  1:
+    target: xbox_duke
+    profile: pgr2_racing
+    devices:
+    - device: wheel
+      position: centre
+      port_path: pci-0000:00:14.0-usb-0:1:1.0
+    - position: floor
+    - device: th8a
+      position: right
+    - device: sinden_pedal
+      position: floor
+  2:
+    target: steel_battalion
+    profile: sbc_real
+    last_used:
+      1128464386: sbc_real
+    devices:
+    - device: sbc_wire
+  3:
+    target: xbox_duke

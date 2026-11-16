@@ -1,0 +1,10 @@
+# BAD fixture (work/0043): bindings_racing.yaml with one change: the saturation is 0. Load the good set with this file IN PLACE OF
+# bindings_racing.yaml; it must be refused with RESPONSE_SATURATION.
+schema: sim-profile/1
+kind: bindings
+id: pgr2_pedals
+device: racing_pedals
+target: xbox_duke
+bind:
+  - { source: accel, target: right_trigger, response: { window: [0.1, 0.9], curve: 1.0, saturation: 0 } }
+  - { source: brake, target: left_trigger }

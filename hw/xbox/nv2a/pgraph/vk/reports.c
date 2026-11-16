@@ -18,6 +18,7 @@
  */
 
 #include "renderer.h"
+#include "hw/xbox/nv2a/pgraph/vr_worldproj.h"
 
 bool pgraph_vk_query_ring_enabled(void)
 {
@@ -66,6 +67,8 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
 
     r->async_reports_enabled = pgraph_vk_async_reports_enabled();
     r->batch_qreset_enabled = pgraph_vk_batch_qreset_enabled();
+    r->query_eager_min_draws =
+        query_ring_env_u32("XEMU_QUERY_EAGER", 32, 0, 1u << 20);
     r->report_marker_pending = false;
     r->report_marker_watermark = 0;
     r->report_marker_submit = 0;
@@ -116,6 +119,12 @@ void pgraph_vk_init_reports(PGRAPHState *pg)
     memset(r->query_index_submit, 0xFF,
            r->max_queries_in_flight * sizeof(uint32_t));
 
+    r->render_pass_views = 1;
+    r->query_open_slots = 1;
+    r->query_slot_views = pgraph_vk_stereo_on() ?
+                              g_malloc0(r->max_queries_in_flight) :
+                              NULL;
+
     VkQueryPoolCreateInfo pool_create_info = (VkQueryPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
         .queryType = VK_QUERY_TYPE_OCCLUSION,
@@ -148,6 +157,8 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg)
 
     g_free(r->query_index_submit);
     r->query_index_submit = NULL;
+    g_free(r->query_slot_views);
+    r->query_slot_views = NULL;
 
     g_free(r->query_epochs);
     r->query_epochs = NULL;
@@ -161,6 +172,8 @@ void pgraph_vk_clear_report_value(NV2AState *d)
     QueryReport *report = g_malloc(sizeof(QueryReport));
     report->clear = true;
     report->parameter = 0;
+    report->wp_scale = 1.0;
+    report->wp_cap = 0.0;
     report->query_count = r->num_queries_in_flight;
     report->enqueue_us =
         r->async_reports_enabled ? g_get_monotonic_time() : 0;
@@ -180,18 +193,40 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     QueryReport *report = g_malloc(sizeof(QueryReport));
     report->clear = false;
     report->parameter = parameter;
+    vr_worldproj_report_take(&report->wp_scale, &report->wp_cap);
+    if (pgraph_vk_query_ring_enabled() && report->wp_scale != 1.0) {
+        static bool said;
+        if (!said) {
+            fprintf(stderr, "vr-wp: XEMU_QUERY_RING is on: occlusion counts "
+                    "are not scaled (qscale)\n");
+            said = true;
+        }
+        report->wp_scale = 1.0;
+        report->wp_cap = 0.0;
+    }
     report->query_count = r->num_queries_in_flight;
     report->enqueue_us =
         r->async_reports_enabled ? g_get_monotonic_time() : 0;
     QSIMPLEQ_INSERT_TAIL(&r->report_queue, report, entry);
 
     r->new_query_needed = true;
+
+    if (r->query_eager_min_draws > 0 && r->in_command_buffer &&
+        !r->query_ring_enabled && !r->batch_qreset_enabled &&
+        pg->query_eager_draws >= r->query_eager_min_draws) {
+        pgraph_vk_submit_batch(pg, VK_FINISH_REASON_QUERY_ASYNC);
+    }
 }
 
-static uint32_t zpass_result_scaled(PGRAPHState *pg, PGRAPHVkState *r)
+static uint32_t zpass_result_scaled(PGRAPHState *pg, PGRAPHVkState *r,
+                                    const QueryReport *report)
 {
     const uint32_t divisor =
         (uint32_t)(pg->surface_scale_factor * pg->surface_scale_factor);
+    if (report->wp_scale != 1.0) {
+        return vr_wp_scale_count(r->zpass_pixel_count_result, divisor,
+                                 report->wp_scale, report->wp_cap);
+    }
     if (r->async_reports_enabled || r->batch_qreset_enabled) {
         return (uint32_t)(((uint64_t)r->zpass_pixel_count_result +
                            divisor / 2) /
@@ -248,6 +283,8 @@ static void apply_reports_from_range(NV2AState *d, uint32_t src_base,
                     read * sizeof(uint64_t), query_results, sizeof(uint64_t),
                     VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
             } while (result == VK_NOT_READY);
+            pgraph_vk_stereo_fold_query_results(r, src_base, query_results,
+                                                read);
         }
     }
 
@@ -267,8 +304,8 @@ static void apply_reports_from_range(NV2AState *d, uint32_t src_base,
             NV2A_VK_DPRINTF("Cleared");
             r->zpass_pixel_count_result = 0;
         } else {
-            pgraph_write_zpass_pixel_cnt_report(d, report->parameter,
-                                                zpass_result_scaled(pg, r));
+            uint32_t zpass = zpass_result_scaled(pg, r, report);
+            pgraph_write_zpass_pixel_cnt_report(d, report->parameter, zpass);
         }
 
         QSIMPLEQ_REMOVE_HEAD(&r->report_queue, entry);
@@ -319,6 +356,8 @@ static void apply_reports_prefix(NV2AState *d, uint32_t take)
                 take * sizeof(uint64_t), query_results, sizeof(uint64_t),
                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
         } while (result == VK_NOT_READY);
+        pgraph_vk_stereo_fold_query_results(r, r->query_epoch_base,
+                                            query_results, take);
     }
 
     uint32_t num_results_counted = 0;
@@ -337,8 +376,8 @@ static void apply_reports_prefix(NV2AState *d, uint32_t take)
             NV2A_VK_DPRINTF("Cleared");
             r->zpass_pixel_count_result = 0;
         } else {
-            pgraph_write_zpass_pixel_cnt_report(d, report->parameter,
-                                                zpass_result_scaled(pg, r));
+            uint32_t zpass = zpass_result_scaled(pg, r, report);
+            pgraph_write_zpass_pixel_cnt_report(d, report->parameter, zpass);
         }
 
         QSIMPLEQ_REMOVE_HEAD(&r->report_queue, entry);
@@ -422,6 +461,14 @@ bool pgraph_vk_batch_qreset_enabled(void)
                    getenv("XEMU_NO_BATCH_QRESET") == NULL)
                       ? 1
                       : 0;
+        if (!enabled && pgraph_vk_stereo_on()) {
+            enabled = 1;
+            fprintf(stderr, "vr-stereo: batch-qreset forced ON%s: occlusion "
+                    "queries begin inside the render pass, two slots each "
+                    "under multiview\n",
+                    getenv("XEMU_NO_BATCH_QRESET") ?
+                        " (overriding XEMU_NO_BATCH_QRESET)" : "");
+        }
         fprintf(stderr,
                 "batch-qreset: batched query reset + in-pass queries %s\n",
                 enabled ? "ON" : "OFF");

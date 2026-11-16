@@ -1,0 +1,9 @@
+# A racing pedal set over SDL joystick: accelerator rests at -32768 (design 3.1, ISS-B32).
+schema: sim-profile/1
+kind: device
+id: racing_pedals
+source: sdl_joystick
+template: pedals_2_v1
+inputs:
+  - { id: accel, kind: axis, min: -32768, rest: -32768, max: 32767, anchor: [120, 300], slot: r1 }
+  - { id: brake, kind: axis, min: -32768, rest: -32768, max: 32767, deadzone: 0.02 }

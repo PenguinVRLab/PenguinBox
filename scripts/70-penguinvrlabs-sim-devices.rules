@@ -1,0 +1,17 @@
+# /etc/udev/rules.d/70-penguinvrlabs-sim-devices.rules
+# The Sim Configurator family's device rules (Sim Configurator decisions S-47, S-48, S-49): ONE file, kept in the Sim
+# Configurator repository; PenguinBox's --install-sbc-rules installs this same file. Each line gives the person logged
+# in at this computer access to ONE device while they are logged in (uaccess), and nobody else: MODE 0660 on a node
+# root owns. EVERY LINE IS COPIED FROM VALVE'S steam-devices RULES, their exact form, with our device's ID.
+# Install: sudo install -m 0644 70-penguinvrlabs-sim-devices.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload        then unplug the device and plug it in again.
+# Remove:  delete the file, run the reload, and unplug and plug the device in again.
+# Keyboard- and mouse-like devices are NOT here: the app makes a read-only rule for one unit (S-46), never uaccess.
+
+# Steel Battalion controller, 0a7b:d000 (NEEDED for it): the Sim Configurator and PenguinBox may claim its USB interface.
+# COPIED FROM VALVE: steam-devices 60-steam-input.rules form (MODE="0660", TAG+="uaccess")
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0a7b", ATTRS{idProduct}=="d000", MODE="0660", TAG+="uaccess"
+
+# Thrustmaster T.16000M, 044f:b10a (optional): its raw HID node, where the left/right hand switch is.
+# COPIED FROM VALVE: steam-devices 60-steam-input.rules form (MODE="0660", TAG+="uaccess")
+KERNEL=="hidraw*", ATTRS{idVendor}=="044f", ATTRS{idProduct}=="b10a", MODE="0660", TAG+="uaccess"

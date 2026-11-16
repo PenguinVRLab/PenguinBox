@@ -1,0 +1,19 @@
+# BAD fixture (work/0039): device_shifter.yaml with one change: the shifter takes the wheel's id. Load the good set with this file IN PLACE OF
+# device_shifter.yaml; it must be refused with DUPLICATE_ID.
+schema: sim-profile/1
+kind: device
+id: wheel
+source: sdl_joystick
+template: shifter_v1
+inputs:
+- id: gate
+  kind: detent
+  positions:
+  - n
+  - '1'
+  - '2'
+  - '3'
+  - '4'
+  - '5'
+  - '6'
+  - r

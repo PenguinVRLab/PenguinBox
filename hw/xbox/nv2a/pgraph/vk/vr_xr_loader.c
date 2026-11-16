@@ -37,7 +37,7 @@ static bool resolve(XrInstance instance, const char *name,
 {
     XrResult res = xr_pfn.GetInstanceProcAddr(instance, name, out);
     if (XR_FAILED(res) || *out == NULL) {
-        fprintf(stderr, "xemu-vr: failed to resolve %s (%d)\n", name,
+        fprintf(stderr, "PenguinBox: failed to resolve %s (%d)\n", name,
                 (int)res);
         *out = NULL;
         return false;
@@ -59,7 +59,7 @@ bool vr_xr_loader_init(void)
         s_loader_handle = dlopen("libopenxr_loader.so", RTLD_NOW | RTLD_LOCAL);
     }
     if (s_loader_handle == NULL) {
-        fprintf(stderr, "xemu-vr: OpenXR loader not found (%s) — is an "
+        fprintf(stderr, "PenguinBox: OpenXR loader not found (%s) — is an "
                         "OpenXR runtime installed? Running flat.\n",
                 dlerror());
         return false;
@@ -69,7 +69,7 @@ bool vr_xr_loader_init(void)
         (PFN_xrGetInstanceProcAddr)dlsym(s_loader_handle,
                                          "xrGetInstanceProcAddr");
     if (xr_pfn.GetInstanceProcAddr == NULL) {
-        fprintf(stderr, "xemu-vr: loader lacks xrGetInstanceProcAddr — "
+        fprintf(stderr, "PenguinBox: loader lacks xrGetInstanceProcAddr — "
                         "running flat.\n");
         return false;
     }
@@ -94,6 +94,7 @@ bool vr_xr_load_instance_pfns(XrInstance instance)
     RESOLVE(GetInstanceProperties);
     RESOLVE(GetSystem);
     RESOLVE(GetSystemProperties);
+    RESOLVE(EnumerateEnvironmentBlendModes);
     RESOLVE(ResultToString);
     RESOLVE(PollEvent);
     RESOLVE(CreateSession);
@@ -103,6 +104,8 @@ bool vr_xr_load_instance_pfns(XrInstance instance)
     RESOLVE(CreateReferenceSpace);
     RESOLVE(DestroySpace);
     RESOLVE(LocateSpace);
+    RESOLVE(LocateViews);
+    RESOLVE(EnumerateViewConfigurationViews);
     RESOLVE(CreateSwapchain);
     RESOLVE(DestroySwapchain);
     RESOLVE(EnumerateSwapchainFormats);
@@ -113,11 +116,34 @@ bool vr_xr_load_instance_pfns(XrInstance instance)
     RESOLVE(WaitFrame);
     RESOLVE(BeginFrame);
     RESOLVE(EndFrame);
+    RESOLVE(StringToPath);
+    RESOLVE(CreateActionSet);
+    RESOLVE(DestroyActionSet);
+    RESOLVE(CreateAction);
+    RESOLVE(DestroyAction);
+    RESOLVE(SuggestInteractionProfileBindings);
+    RESOLVE(AttachSessionActionSets);
+    RESOLVE(CreateActionSpace);
+    RESOLVE(SyncActions);
+    RESOLVE(GetActionStatePose);
+    RESOLVE(GetActionStateBoolean);
     RESOLVE(GetVulkanGraphicsRequirements2KHR);
     RESOLVE(CreateVulkanInstanceKHR);
     RESOLVE(GetVulkanGraphicsDevice2KHR);
     RESOLVE(CreateVulkanDeviceKHR);
 #undef RESOLVE
+
+#define RESOLVE_SOFT(name)                                                 \
+    do {                                                                   \
+        if (XR_FAILED(xr_pfn.GetInstanceProcAddr(                          \
+                instance, "xr" #name, (PFN_xrVoidFunction *)&xr_pfn.name))) { \
+            xr_pfn.name = NULL;                                            \
+        }                                                                  \
+    } while (0)
+    RESOLVE_SOFT(CreateHandTrackerEXT);
+    RESOLVE_SOFT(DestroyHandTrackerEXT);
+    RESOLVE_SOFT(LocateHandJointsEXT);
+#undef RESOLVE_SOFT
 
     return ok;
 }

@@ -1,0 +1,10 @@
+# Steel Battalion (title ID from xemu_vr ui/xemu-sim-profiles.c:107): the real controller, or two
+# VR Sticks instanced (doc 31 3.5).
+schema: sim-profile/1
+kind: rig
+id: sb_vr_sticks
+game: { title_id: 0x43430002, name: "Steel Battalion" }
+target: steel_battalion
+devices:
+  - { profile: vr_stick, instance: drive, bindings: sb_drive_stick, placement: { side: -0.2, height: -0.3, forward: 0.3 } }
+  - { profile: vr_stick, instance: aim, bindings: sb_aim_stick, placement: { side: 0.2, height: -0.3, forward: 0.3 } }

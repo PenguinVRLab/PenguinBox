@@ -58,6 +58,8 @@ void xemu_settings_save(void);
 
 void xemu_settings_note_requested_renderer(CONFIG_DISPLAY_RENDERER r);
 
+void xemu_settings_note_forced_renderer(CONFIG_DISPLAY_RENDERER r);
+
 bool xemu_settings_save_if_changed(void);
 
 static inline void xemu_settings_set_string(const char **str, const char *new_str)
@@ -77,6 +79,9 @@ bool xemu_settings_load_gamepad_mapping(const char *guid,
 void xemu_settings_reset_controller_mapping(const char *guid);
 
 void xemu_settings_reset_keyboard_mapping(void);
+
+bool xemu_settings_sim_always_open(const char *title_id);
+void xemu_settings_set_sim_always_open(const char *title_id, bool on);
 
 #ifdef __cplusplus
 }

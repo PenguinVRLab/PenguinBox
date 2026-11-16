@@ -1,0 +1,7 @@
+# Keyboard-class peripheral (design 3.7): a button whose only identity is its scancode.
+schema: sim-profile/1
+kind: device
+id: sinden_pedal
+source: keyboard
+inputs:
+  - { id: pedal, kind: button, scancode: c }

@@ -1,0 +1,17 @@
+# BAD fixture (work/0039): bindings_wheel.yaml with one change: a button on an axis with no value. Load the good set with this file IN PLACE OF
+# bindings_wheel.yaml; it must be refused with BUTTON_TO_AXIS_VALUE.
+schema: sim-profile/1
+kind: bindings
+id: pgr2_wheel
+device: wheel
+target: xbox_duke
+bind:
+- source: steering
+  target: left_stick_x
+- source: paddle_up
+  target: right_stick_x
+- source: paddle_down
+  target: b
+- source: pov
+  target: dpad_up
+  direction: up

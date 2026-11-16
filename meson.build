@@ -451,6 +451,13 @@ if host_arch in ['i386', 'x86_64']
   endif
   if get_option('x86_version') >= '3'
     qemu_isa_flags += ['-mmovbe', '-mlzcnt', '-mbmi', '-mbmi2', '-mfma', '-mf16c']
+    # With FMA available, GCC's default (-ffp-contract=fast in the GNU
+    # dialects) fuses a*b+c into one rounding, so host float results would
+    # differ from the same source built without FMA. Keep every TU, the C++
+    # and the subprojects included, at one rounding per operation. Under LTO
+    # this must be a compile flag: the per-function setting is what the
+    # link-time optimiser honours.
+    qemu_isa_flags += ['-ffp-contract=off']
     # The Win64 ABI only guarantees 16-byte stack alignment and its SEH unwind
     # format cannot express realignment beyond that, but GCC's autovectorizer
     # emits 32-byte-aligned spills (vmovdqa) for 256-bit ymm registers under

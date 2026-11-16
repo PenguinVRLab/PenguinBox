@@ -1,0 +1,30 @@
+# BAD fixture (work/0039): device_wheel.yaml with one change: match vid is text. Load the good set with this file IN PLACE OF
+# device_wheel.yaml; it must be refused with MATCH_SHAPE.
+schema: sim-profile/1
+kind: device
+id: wheel
+source: sdl_joystick
+template: wheel_v1
+inputs:
+- id: steering
+  kind: axis
+  min: -32768
+  rest: 0
+  max: 32767
+- id: paddle_up
+  kind: button
+- id: paddle_down
+  kind: button
+- id: pov
+  kind: hat
+outputs:
+- transport: sdl_haptic
+  effects:
+  - constant
+  - spring
+  gain: 0.35
+  clamp: 0.8
+  invert: false
+match:
+  vid: x
+  pid: 1

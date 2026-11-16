@@ -1,27 +1,36 @@
-The QEMU distribution includes both the QEMU emulator and
-various firmware files.  These are separate programs that are
-distributed together for our users' convenience, and they have
-separate licenses.
+PenguinBox — licensing
+======================
 
-The following points clarify the license of the QEMU emulator:
+PenguinBox is a fork of xemu, which is a fork of QEMU. The distribution
+includes both the emulator and various firmware files. These are separate
+programs distributed together for convenience, and they have separate
+licenses.
 
-1) The QEMU emulator as a whole is released under the GNU General
-Public License, version 2.
+1) The emulator as a whole is released under the GNU General Public License,
+   version 2 (GPLv2). A copy is in COPYING.
 
-2) Parts of the QEMU emulator have specific licenses which are compatible
-with the GNU General Public License, version 2. Hence each source file
-contains its own licensing information.  Source files with no licensing
-information are released under the GNU General Public License, version
-2 or (at your option) any later version.
+2) Parts of the emulator carry specific licenses compatible with GPLv2, so
+   each source file contains its own licensing information. Source files with
+   no licensing information are released under the GNU General Public License,
+   version 2 or (at your option) any later version.
 
-As of July 2013, contributions under version 2 of the GNU General Public
-License (and no later version) are only accepted for the following files
-or directories: bsd-user/, linux-user/, hw/vfio/, hw/xen/xen_pt*.
+3) Code written specifically for this fork — the VR support and the Steel
+   Battalion device, overlay and performance work — is licensed MIT, which
+   flows cleanly into the GPLv2 aggregate and remains reusable on its own.
+   Those files carry an explicit SPDX-License-Identifier: MIT header.
 
-3) The Tiny Code Generator (TCG) is mostly under the BSD or MIT licenses;
-   but some parts may be GPLv2 or other licenses. Again, see the
-   specific licensing information in each source file.
+   One exception, stated because it is not ours to relicense:
+   hw/xbox/xid-steel-battalion.c derives from xemu's hw/xbox/xid.c and carries
+   the copyrights of its original authors. It remains LGPL-2.0-or-later.
 
-4) QEMU is a trademark of Fabrice Bellard.
+4) The firmware files in pc-bios/ and the ROM submodules referenced by
+   .gitmodules are separate works under their own licenses; see the
+   corresponding upstream projects. Submodules are not vendored into this
+   archive — .gitmodules records the pinned revisions so they can be fetched.
 
-Fabrice Bellard and the QEMU team
+5) No Xbox BIOS, MCPX boot ROM, EEPROM, or game media is included in or
+   distributed with this software.
+
+The overwhelming majority of this software is the work of the QEMU and xemu
+projects and their contributors. See MAINTAINERS and the per-file copyright
+headers.

@@ -12,6 +12,12 @@
 #include "vr.h"
 #include "vr_internal.h"
 #include "vr_sbc_panel.h"
+#include "vr_xr_input.h"
+#include "vr_ui_panel.h"
+#include "qemu/timer.h"
+#include "hw/xbox/nv2a/pgraph/vr_worldproj.h"
+#include "vr_xr_eyes.h"
+#include "vr_nearfield.h"
 
 #define ONE_SECOND_NS 1000000000LL
 
@@ -22,6 +28,21 @@ typedef enum VRCopyResult {
 } VRCopyResult;
 
 static QemuMutex vr_frame_mutex;
+
+static XrTime s_latest_display_time;
+static struct {
+    bool valid;
+    XrTime t;
+    XrSpaceLocation head;
+    XrView views[2];
+} s_pose_cache;
+static struct {
+    int64_t sum_us, max_us;
+    unsigned int n;
+} s_locate_cost;
+static VrWpStamp s_img_stamp;
+static bool s_img_projection;
+static int s_layer_said = -1;
 static bool vr_frame_mutex_inited;
 
 static bool check_xr(XrResult res, const char *what)
@@ -35,15 +56,17 @@ static bool check_xr(XrResult res, const char *what)
         xr_pfn.ResultToString != NULL) {
         xr_pfn.ResultToString(g_xemu_vr.xr.instance, res, buf);
     }
-    fprintf(stderr, "xemu-vr: %s failed: %s (%d)\n", what, buf, (int)res);
+    fprintf(stderr, "PenguinBox: %s failed: %s (%d)\n", what, buf, (int)res);
     return false;
 }
 
-static void image_barrier(VkCommandBuffer cmd, VkImage image,
-                          VkImageLayout old_layout, VkImageLayout new_layout,
-                          VkAccessFlags src_access, VkAccessFlags dst_access,
-                          VkPipelineStageFlags src_stage,
-                          VkPipelineStageFlags dst_stage)
+static void image_barrier_layer(VkCommandBuffer cmd, VkImage image,
+                                uint32_t layer, VkImageLayout old_layout,
+                                VkImageLayout new_layout,
+                                VkAccessFlags src_access,
+                                VkAccessFlags dst_access,
+                                VkPipelineStageFlags src_stage,
+                                VkPipelineStageFlags dst_stage)
 {
     VkImageMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -54,10 +77,20 @@ static void image_barrier(VkCommandBuffer cmd, VkImage image,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = image,
-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1 },
     };
     vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1,
                          &barrier);
+}
+
+static void image_barrier(VkCommandBuffer cmd, VkImage image,
+                          VkImageLayout old_layout, VkImageLayout new_layout,
+                          VkAccessFlags src_access, VkAccessFlags dst_access,
+                          VkPipelineStageFlags src_stage,
+                          VkPipelineStageFlags dst_stage)
+{
+    image_barrier_layer(cmd, image, 0, old_layout, new_layout, src_access,
+                        dst_access, src_stage, dst_stage);
 }
 
 static XrQuaternionf quat_mul(XrQuaternionf a, XrQuaternionf b)
@@ -81,7 +114,7 @@ static void wait_all_fences(VRCompositor *c)
             vkWaitForFences(c->device, 1, &c->fences[i], VK_TRUE,
                             ONE_SECOND_NS);
         if (res == VK_TIMEOUT) {
-            fprintf(stderr, "xemu-vr: copy fence %u still busy after 1s "
+            fprintf(stderr, "PenguinBox: copy fence %u still busy after 1s "
                             "during teardown.\n", i);
         }
         vkResetFences(c->device, 1, &c->fences[i]);
@@ -108,6 +141,8 @@ static void destroy_swapchains(VRCompositor *c)
     c->swapchain_height = 0;
     g_free(c->flip_regions);
     c->flip_regions = NULL;
+    g_free(c->flip_regions_l1);
+    c->flip_regions_l1 = NULL;
     c->flip_regions_count = 0;
 }
 
@@ -135,7 +170,7 @@ static bool create_chain(VRCompositor *c, uint32_t eye, uint32_t w,
         chain->swapchain = XR_NULL_HANDLE;
         if (!c->warned_swapchain) {
             c->warned_swapchain = true;
-            fprintf(stderr, "xemu-vr: xrCreateSwapchain failed (%d) for "
+            fprintf(stderr, "PenguinBox: xrCreateSwapchain failed (%d) for "
                             "%ux%u; frames skipped until it succeeds.\n",
                     (int)res, w, h);
         }
@@ -162,38 +197,52 @@ static bool create_chain(VRCompositor *c, uint32_t eye, uint32_t w,
     }
     chain->num_images = count;
 
-    fprintf(stderr, "xemu-vr: XR swapchain created (eye %u): %ux%u, %u "
+    fprintf(stderr, "PenguinBox: XR swapchain created (eye %u): %ux%u, %u "
                     "images (VK_FORMAT_R8G8B8A8_SRGB).\n", eye, w, h, count);
     return true;
 }
 
-static bool ensure_swapchains(VRCompositor *c, uint32_t w, uint32_t h)
+static VkImageCopy *make_flip_regions(uint32_t w, uint32_t h, uint32_t layer)
+{
+    VkImageCopy *regions = g_new0(VkImageCopy, h);
+    for (uint32_t y = 0; y < h; y++) {
+        regions[y] = (VkImageCopy){
+            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 },
+            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+            .srcOffset = { 0, (int32_t)y, 0 },
+            .dstOffset = { 0, (int32_t)(h - 1 - y), 0 },
+            .extent = { w, 1, 1 },
+        };
+    }
+    return regions;
+}
+
+static bool ensure_swapchains(VRCompositor *c, uint32_t w, uint32_t h,
+                              uint32_t nchains)
 {
     if (c->swapchain_width != 0 &&
         (c->swapchain_width != w || c->swapchain_height != h)) {
         destroy_swapchains(c);
     }
 
-    if (c->chains[0].swapchain == XR_NULL_HANDLE) {
-        if (!create_chain(c, 0, w, h)) {
-            destroy_swapchains(c);
-            return false;
+    for (uint32_t e = 0; e < nchains; e++) {
+        if (c->chains[e].swapchain == XR_NULL_HANDLE) {
+            if (!create_chain(c, e, w, h)) {
+                destroy_swapchains(c);
+                return false;
+            }
         }
     }
 
     if (c->flip_regions_count != h) {
         g_free(c->flip_regions);
-        c->flip_regions = g_new0(VkImageCopy, h);
+        g_free(c->flip_regions_l1);
+        c->flip_regions_l1 = NULL;
+        c->flip_regions = make_flip_regions(w, h, 0);
         c->flip_regions_count = h;
-        for (uint32_t y = 0; y < h; y++) {
-            c->flip_regions[y] = (VkImageCopy){
-                .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                .srcOffset = { 0, (int32_t)y, 0 },
-                .dstOffset = { 0, (int32_t)(h - 1 - y), 0 },
-                .extent = { w, 1, 1 },
-            };
-        }
+    }
+    if (nchains > 1 && c->flip_regions_l1 == NULL) {
+        c->flip_regions_l1 = make_flip_regions(w, h, 1);
     }
 
     c->swapchain_width = w;
@@ -202,7 +251,8 @@ static bool ensure_swapchains(VRCompositor *c, uint32_t w, uint32_t h)
     return true;
 }
 
-static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
+static bool record_and_submit_copy(VRCompositor *c, VkImage src,
+                                   uint32_t src_layer, VkImage dst)
 {
     const uint32_t i = c->next_cmd_buffer;
     c->next_cmd_buffer = (c->next_cmd_buffer + 1) % VR_COMP_NUM_CMD_BUFFERS;
@@ -213,7 +263,7 @@ static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
         if (wr != VK_SUCCESS) {
             if (!c->warned_fence_timeout) {
                 c->warned_fence_timeout = true;
-                fprintf(stderr, "xemu-vr: copy fence wait returned %d; "
+                fprintf(stderr, "PenguinBox: copy fence wait returned %d; "
                                 "skipping this frame's copy.\n", (int)wr);
             }
             return false;
@@ -229,17 +279,17 @@ static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
     };
     VkResult vr = vkBeginCommandBuffer(cmd, &bi);
     if (vr != VK_SUCCESS) {
-        fprintf(stderr, "xemu-vr: vkBeginCommandBuffer failed (%d).\n",
+        fprintf(stderr, "PenguinBox: vkBeginCommandBuffer failed (%d).\n",
                 (int)vr);
         return false;
     }
 
-    image_barrier(cmd, src,
-                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                  VK_PIPELINE_STAGE_TRANSFER_BIT);
+    image_barrier_layer(cmd, src, src_layer,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT);
 
     image_barrier(cmd, dst,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -252,7 +302,8 @@ static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
 
     vkCmdCopyImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   c->flip_regions_count, c->flip_regions);
+                   c->flip_regions_count,
+                   src_layer ? c->flip_regions_l1 : c->flip_regions);
 
     image_barrier(cmd, dst,
                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -263,16 +314,17 @@ static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
                   VK_PIPELINE_STAGE_TRANSFER_BIT,
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-    image_barrier(cmd, src,
-                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-                  VK_PIPELINE_STAGE_TRANSFER_BIT,
-                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    image_barrier_layer(cmd, src, src_layer,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
 
     vr = vkEndCommandBuffer(cmd);
     if (vr != VK_SUCCESS) {
-        fprintf(stderr, "xemu-vr: vkEndCommandBuffer failed (%d).\n",
+        fprintf(stderr, "PenguinBox: vkEndCommandBuffer failed (%d).\n",
                 (int)vr);
         return false;
     }
@@ -284,7 +336,7 @@ static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
     };
     vr = vkQueueSubmit(c->queue, 1, &si, c->fences[i]);
     if (vr != VK_SUCCESS) {
-        fprintf(stderr, "xemu-vr: vkQueueSubmit failed (%d).\n", (int)vr);
+        fprintf(stderr, "PenguinBox: vkQueueSubmit failed (%d).\n", (int)vr);
         return false;
     }
     c->fence_submitted[i] = true;
@@ -292,7 +344,7 @@ static bool record_and_submit_copy(VRCompositor *c, VkImage src, VkImage dst)
 }
 
 static VRCopyResult copy_to_swapchain(VRCompositor *c, VkImage src,
-                                      VREyeChain *chain)
+                                      uint32_t src_layer, VREyeChain *chain)
 {
     uint32_t index = 0;
     if (chain->wait_pending) {
@@ -306,7 +358,7 @@ static VRCopyResult copy_to_swapchain(VRCompositor *c, VkImage src,
         if (XR_FAILED(res)) {
             if (!c->warned_acquire) {
                 c->warned_acquire = true;
-                fprintf(stderr, "xemu-vr: xrAcquireSwapchainImage failed "
+                fprintf(stderr, "PenguinBox: xrAcquireSwapchainImage failed "
                                 "(%d).\n", (int)res);
             }
             return VR_COPY_SKIPPED;
@@ -323,7 +375,7 @@ static VRCopyResult copy_to_swapchain(VRCompositor *c, VkImage src,
     if (res == XR_TIMEOUT_EXPIRED) {
         if (!c->warned_wait_timeout) {
             c->warned_wait_timeout = true;
-            fprintf(stderr, "xemu-vr: xrWaitSwapchainImage timed out; "
+            fprintf(stderr, "PenguinBox: xrWaitSwapchainImage timed out; "
                             "skipping copy this frame.\n");
         }
         return VR_COPY_TIMEOUT_ZERO_LAYER;
@@ -331,7 +383,7 @@ static VRCopyResult copy_to_swapchain(VRCompositor *c, VkImage src,
     if (XR_FAILED(res)) {
         if (!c->warned_wait_fail) {
             c->warned_wait_fail = true;
-            fprintf(stderr, "xemu-vr: xrWaitSwapchainImage failed (%d).\n",
+            fprintf(stderr, "PenguinBox: xrWaitSwapchainImage failed (%d).\n",
                     (int)res);
         }
         return VR_COPY_TIMEOUT_ZERO_LAYER;
@@ -339,7 +391,7 @@ static VRCopyResult copy_to_swapchain(VRCompositor *c, VkImage src,
     chain->wait_pending = false;
 
     bool submitted =
-        record_and_submit_copy(c, src, chain->images[index].image);
+        record_and_submit_copy(c, src, src_layer, chain->images[index].image);
 
     XrSwapchainImageReleaseInfo ri = {
         .type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO,
@@ -348,7 +400,7 @@ static VRCopyResult copy_to_swapchain(VRCompositor *c, VkImage src,
     if (XR_FAILED(res)) {
         if (!c->warned_release) {
             c->warned_release = true;
-            fprintf(stderr, "xemu-vr: xrReleaseSwapchainImage failed "
+            fprintf(stderr, "PenguinBox: xrReleaseSwapchainImage failed "
                             "(%d).\n", (int)res);
         }
         return VR_COPY_SKIPPED;
@@ -380,7 +432,7 @@ static bool create_panel_chain(VRCompositor *c)
         chain->swapchain = XR_NULL_HANDLE;
         if (!c->warned_panel) {
             c->warned_panel = true;
-            fprintf(stderr, "xemu-vr: panel xrCreateSwapchain failed (%d); "
+            fprintf(stderr, "PenguinBox: panel xrCreateSwapchain failed (%d); "
                             "cockpit panel stays hidden.\n", (int)res);
         }
         return false;
@@ -406,7 +458,7 @@ static bool create_panel_chain(VRCompositor *c)
     }
     chain->num_images = count;
 
-    fprintf(stderr, "xemu-vr: SBC panel swapchain created: %ux%u, %u images "
+    fprintf(stderr, "PenguinBox: SBC panel swapchain created: %ux%u, %u images "
                     "(VK_FORMAT_R8G8B8A8_SRGB).\n",
             (unsigned)VR_SBC_PANEL_W, (unsigned)VR_SBC_PANEL_H, count);
     return true;
@@ -427,7 +479,7 @@ static bool create_panel_staging(VRCompositor *c, PGRAPHState *pg)
         c->panel_staging_buffer = VK_NULL_HANDLE;
         if (!c->warned_panel) {
             c->warned_panel = true;
-            fprintf(stderr, "xemu-vr: panel staging vkCreateBuffer failed.\n");
+            fprintf(stderr, "PenguinBox: panel staging vkCreateBuffer failed.\n");
         }
         return false;
     }
@@ -441,7 +493,7 @@ static bool create_panel_staging(VRCompositor *c, PGRAPHState *pg)
     if (mem_type == 0xFFFFFFFF) {
         if (!c->warned_panel) {
             c->warned_panel = true;
-            fprintf(stderr, "xemu-vr: panel staging: no host-visible coherent "
+            fprintf(stderr, "PenguinBox: panel staging: no host-visible coherent "
                             "memory type.\n");
         }
         return false;
@@ -457,20 +509,20 @@ static bool create_panel_staging(VRCompositor *c, PGRAPHState *pg)
         c->panel_staging_memory = VK_NULL_HANDLE;
         if (!c->warned_panel) {
             c->warned_panel = true;
-            fprintf(stderr, "xemu-vr: panel staging vkAllocateMemory "
+            fprintf(stderr, "PenguinBox: panel staging vkAllocateMemory "
                             "failed.\n");
         }
         return false;
     }
     if (vkBindBufferMemory(c->device, c->panel_staging_buffer,
                            c->panel_staging_memory, 0) != VK_SUCCESS) {
-        fprintf(stderr, "xemu-vr: panel staging vkBindBufferMemory failed.\n");
+        fprintf(stderr, "PenguinBox: panel staging vkBindBufferMemory failed.\n");
         return false;
     }
     if (vkMapMemory(c->device, c->panel_staging_memory, 0, size, 0,
                     &c->panel_staging_mapped) != VK_SUCCESS) {
         c->panel_staging_mapped = NULL;
-        fprintf(stderr, "xemu-vr: panel staging vkMapMemory failed.\n");
+        fprintf(stderr, "PenguinBox: panel staging vkMapMemory failed.\n");
         return false;
     }
     memset(c->panel_staging_mapped, 0, size);
@@ -490,7 +542,7 @@ static bool create_panel_cmd(VRCompositor *c)
         c->panel_cmd = VK_NULL_HANDLE;
         if (!c->warned_panel) {
             c->warned_panel = true;
-            fprintf(stderr, "xemu-vr: panel vkAllocateCommandBuffers "
+            fprintf(stderr, "PenguinBox: panel vkAllocateCommandBuffers "
                             "failed.\n");
         }
         return false;
@@ -505,7 +557,7 @@ static bool create_panel_cmd(VRCompositor *c)
         c->panel_cmd = VK_NULL_HANDLE;
         if (!c->warned_panel) {
             c->warned_panel = true;
-            fprintf(stderr, "xemu-vr: panel vkCreateFence failed.\n");
+            fprintf(stderr, "PenguinBox: panel vkCreateFence failed.\n");
         }
         return false;
     }
@@ -519,7 +571,7 @@ static void destroy_panel(VRCompositor *c)
         VkResult res = vkWaitForFences(c->device, 1, &c->panel_fence, VK_TRUE,
                                        ONE_SECOND_NS);
         if (res == VK_TIMEOUT) {
-            fprintf(stderr, "xemu-vr: panel copy fence still busy after 1s "
+            fprintf(stderr, "PenguinBox: panel copy fence still busy after 1s "
                             "during teardown.\n");
         }
         c->panel_fence_submitted = false;
@@ -581,7 +633,7 @@ static bool record_and_submit_panel_copy(VRCompositor *c, VkImage dst)
     if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) {
         if (!c->warned_panel_upload) {
             c->warned_panel_upload = true;
-            fprintf(stderr, "xemu-vr: panel vkBeginCommandBuffer failed.\n");
+            fprintf(stderr, "PenguinBox: panel vkBeginCommandBuffer failed.\n");
         }
         return false;
     }
@@ -631,7 +683,7 @@ static bool record_and_submit_panel_copy(VRCompositor *c, VkImage dst)
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         if (!c->warned_panel_upload) {
             c->warned_panel_upload = true;
-            fprintf(stderr, "xemu-vr: panel vkEndCommandBuffer failed.\n");
+            fprintf(stderr, "PenguinBox: panel vkEndCommandBuffer failed.\n");
         }
         return false;
     }
@@ -644,7 +696,7 @@ static bool record_and_submit_panel_copy(VRCompositor *c, VkImage dst)
     if (vkQueueSubmit(c->queue, 1, &si, c->panel_fence) != VK_SUCCESS) {
         if (!c->warned_panel_upload) {
             c->warned_panel_upload = true;
-            fprintf(stderr, "xemu-vr: panel vkQueueSubmit failed.\n");
+            fprintf(stderr, "PenguinBox: panel vkQueueSubmit failed.\n");
         }
         return false;
     }
@@ -667,7 +719,7 @@ static bool panel_upload(VRCompositor *c)
                                                    &index))) {
             if (!c->warned_panel_acquire) {
                 c->warned_panel_acquire = true;
-                fprintf(stderr, "xemu-vr: panel xrAcquireSwapchainImage "
+                fprintf(stderr, "PenguinBox: panel xrAcquireSwapchainImage "
                                 "failed.\n");
             }
             return false;
@@ -684,7 +736,7 @@ static bool panel_upload(VRCompositor *c)
     if (res == XR_TIMEOUT_EXPIRED || XR_FAILED(res)) {
         if (!c->warned_panel_wait) {
             c->warned_panel_wait = true;
-            fprintf(stderr, "xemu-vr: panel xrWaitSwapchainImage failed "
+            fprintf(stderr, "PenguinBox: panel xrWaitSwapchainImage failed "
                             "(%d).\n", (int)res);
         }
         return false;
@@ -699,7 +751,7 @@ static bool panel_upload(VRCompositor *c)
     if (XR_FAILED(xr_pfn.ReleaseSwapchainImage(chain->swapchain, &ri))) {
         if (!c->warned_panel_release) {
             c->warned_panel_release = true;
-            fprintf(stderr, "xemu-vr: panel xrReleaseSwapchainImage "
+            fprintf(stderr, "PenguinBox: panel xrReleaseSwapchainImage "
                             "failed.\n");
         }
         return false;
@@ -737,7 +789,7 @@ static void *pacer_thread_main(void *opaque)
             }
             if (!c->warned_pacer) {
                 c->warned_pacer = true;
-                fprintf(stderr, "xemu-vr: xrWaitFrame failed (%d); pacer "
+                fprintf(stderr, "PenguinBox: xrWaitFrame failed (%d); pacer "
                                 "parked. Session-loss handling arrives via "
                                 "events.\n", (int)res);
             }
@@ -745,9 +797,48 @@ static void *pacer_thread_main(void *opaque)
             continue;
         }
 
+        XrSpaceLocation head = { .type = XR_TYPE_SPACE_LOCATION };
+        XrView views[2] = { { .type = XR_TYPE_VIEW }, { .type = XR_TYPE_VIEW } };
+        bool located = false;
+        int64_t t0 = g_get_monotonic_time();
+        if (c->view_space != XR_NULL_HANDLE && xr_pfn.LocateViews &&
+            XR_SUCCEEDED(xr_pfn.LocateSpace(c->view_space, g_xemu_vr.xr.space,
+                                            fs.predictedDisplayTime, &head)) &&
+            (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+            XrViewLocateInfo li = {
+                .type = XR_TYPE_VIEW_LOCATE_INFO,
+                .viewConfigurationType =
+                    XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                .displayTime = fs.predictedDisplayTime,
+                .space = g_xemu_vr.xr.space,
+            };
+            XrViewState vs = { .type = XR_TYPE_VIEW_STATE };
+            uint32_t n = 0;
+            located = XR_SUCCEEDED(xr_pfn.LocateViews(session, &li, &vs, 2, &n,
+                                                      views)) && n == 2;
+        }
+        int64_t dt = g_get_monotonic_time() - t0;
+
         qemu_mutex_lock(&vr_frame_mutex);
         c->pending_frame_state = fs;
         c->has_pending_frame = true;
+        s_latest_display_time = fs.predictedDisplayTime;
+        s_pose_cache.valid = located;
+        if (located) {
+            s_pose_cache.t = fs.predictedDisplayTime;
+            s_pose_cache.head = head;
+            s_pose_cache.views[0] = views[0];
+            s_pose_cache.views[1] = views[1];
+        }
+        s_locate_cost.sum_us += dt;
+        s_locate_cost.max_us = MAX(s_locate_cost.max_us, dt);
+        if (++s_locate_cost.n == 900) {
+            fprintf(stderr, "xemu-vr: pose located on the pacer: mean %lld us, "
+                    "max %lld us over %u frames\n",
+                    (long long)(s_locate_cost.sum_us / s_locate_cost.n),
+                    (long long)s_locate_cost.max_us, s_locate_cost.n);
+            memset(&s_locate_cost, 0, sizeof(s_locate_cost));
+        }
         qemu_mutex_unlock(&vr_frame_mutex);
     }
 
@@ -816,6 +907,84 @@ static void drain_one_paced_frame_for_shutdown(VRCompositor *c)
     xr_pfn.EndFrame(session, &ei);
 }
 
+static void apply_recenter(VRCompositor *c, XrPosef head)
+{
+    const XrQuaternionf q = head.orientation;
+    float yaw = atan2f(2.0f * (q.x * q.z + q.w * q.y),
+                       1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+    c->recenter_pose.orientation =
+        (XrQuaternionf){ 0.0f, sinf(yaw * 0.5f), 0.0f, cosf(yaw * 0.5f) };
+    c->recenter_pose.position = head.position;
+    vr_camera_reset();
+    fprintf(stderr, "xemu-vr: recentered (yaw %.1f deg, eye height "
+                    "%.2f m).\n", yaw * (180.0f / 3.14159265f),
+            head.position.y);
+}
+
+bool vr_compositor_views_at(XrTime t, XrView out[2])
+{
+    bool ok;
+    qemu_mutex_lock(&vr_frame_mutex);
+    ok = s_pose_cache.valid && s_pose_cache.t == t;
+    if (ok) {
+        out[0] = s_pose_cache.views[0];
+        out[1] = s_pose_cache.views[1];
+    }
+    qemu_mutex_unlock(&vr_frame_mutex);
+    return ok;
+}
+
+static bool wp_pose_source(bool fresh, VrWpHmdPose *out)
+{
+    VRCompositor *c = &g_xemu_vr.comp;
+    XrSpaceLocation loc;
+    XrView views[2];
+    XrTime t;
+
+    if (!c->initialized || !vr_xr_session_running()) {
+        return false;
+    }
+    qemu_mutex_lock(&vr_frame_mutex);
+    bool valid = s_pose_cache.valid;
+    t = s_pose_cache.t;
+    loc = s_pose_cache.head;
+    views[0] = s_pose_cache.views[0];
+    views[1] = s_pose_cache.views[1];
+    qemu_mutex_unlock(&vr_frame_mutex);
+    if (!valid) {
+        return false;
+    }
+
+    if (fresh) {
+        apply_recenter(c, loc.pose);
+    }
+    if (!(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+        loc.pose.position = c->recenter_pose.position;
+    }
+
+    out->display_time = t;
+    out->q[0] = loc.pose.orientation.x;
+    out->q[1] = loc.pose.orientation.y;
+    out->q[2] = loc.pose.orientation.z;
+    out->q[3] = loc.pose.orientation.w;
+    out->p[0] = loc.pose.position.x;
+    out->p[1] = loc.pose.position.y;
+    out->p[2] = loc.pose.position.z;
+    out->ref_q[0] = c->recenter_pose.orientation.x;
+    out->ref_q[1] = c->recenter_pose.orientation.y;
+    out->ref_q[2] = c->recenter_pose.orientation.z;
+    out->ref_q[3] = c->recenter_pose.orientation.w;
+    out->ref_p[0] = c->recenter_pose.position.x;
+    out->ref_p[1] = c->recenter_pose.position.y;
+    out->ref_p[2] = c->recenter_pose.position.z;
+    const double e0[4] = { views[0].fov.angleLeft, views[0].fov.angleRight,
+                           views[0].fov.angleUp, views[0].fov.angleDown };
+    const double e1[4] = { views[1].fov.angleLeft, views[1].fov.angleRight,
+                           views[1].fov.angleUp, views[1].fov.angleDown };
+    vr_wp_fov_union(e0, e1, out->tan);
+    return true;
+}
+
 bool vr_compositor_start(PGRAPHState *pg)
 {
     VRCompositor *c = &g_xemu_vr.comp;
@@ -826,7 +995,7 @@ bool vr_compositor_start(PGRAPHState *pg)
     }
 
     if (g_xemu_vr.xr.session == XR_NULL_HANDLE) {
-        fprintf(stderr, "xemu-vr: compositor start: no XR session.\n");
+        fprintf(stderr, "PenguinBox: compositor start: no XR session.\n");
         return false;
     }
 
@@ -859,7 +1028,7 @@ bool vr_compositor_start(PGRAPHState *pg)
         }
     }
     if (!has_srgb) {
-        fprintf(stderr, "xemu-vr: runtime does not offer "
+        fprintf(stderr, "PenguinBox: runtime does not offer "
                         "VK_FORMAT_R8G8B8A8_SRGB. Running flat.\n");
         return false;
     }
@@ -871,7 +1040,7 @@ bool vr_compositor_start(PGRAPHState *pg)
     };
     if (vkCreateCommandPool(c->device, &pci, NULL, &c->cmd_pool) !=
         VK_SUCCESS) {
-        fprintf(stderr, "xemu-vr: vkCreateCommandPool failed.\n");
+        fprintf(stderr, "PenguinBox: vkCreateCommandPool failed.\n");
         c->cmd_pool = VK_NULL_HANDLE;
         return false;
     }
@@ -884,7 +1053,7 @@ bool vr_compositor_start(PGRAPHState *pg)
     };
     if (vkAllocateCommandBuffers(c->device, &cbai, c->cmd_buffers) !=
         VK_SUCCESS) {
-        fprintf(stderr, "xemu-vr: vkAllocateCommandBuffers failed.\n");
+        fprintf(stderr, "PenguinBox: vkAllocateCommandBuffers failed.\n");
         vkDestroyCommandPool(c->device, c->cmd_pool, NULL);
         c->cmd_pool = VK_NULL_HANDLE;
         return false;
@@ -896,7 +1065,7 @@ bool vr_compositor_start(PGRAPHState *pg)
         };
         if (vkCreateFence(c->device, &fci, NULL, &c->fences[i]) !=
             VK_SUCCESS) {
-            fprintf(stderr, "xemu-vr: vkCreateFence failed.\n");
+            fprintf(stderr, "PenguinBox: vkCreateFence failed.\n");
             for (uint32_t j = 0; j < i; j++) {
                 vkDestroyFence(c->device, c->fences[j], NULL);
                 c->fences[j] = VK_NULL_HANDLE;
@@ -955,7 +1124,7 @@ bool vr_compositor_start(PGRAPHState *pg)
     if (XR_FAILED(xr_pfn.CreateReferenceSpace(session, &rsci,
                                               &c->view_space))) {
         c->view_space = XR_NULL_HANDLE;
-        fprintf(stderr, "xemu-vr: VIEW reference space creation failed; "
+        fprintf(stderr, "PenguinBox: VIEW reference space creation failed; "
                         "head pose will stay inert.\n");
     }
 
@@ -969,12 +1138,19 @@ bool vr_compositor_start(PGRAPHState *pg)
     c->has_pending_frame = false;
     qemu_mutex_unlock(&vr_frame_mutex);
 
+    s_latest_display_time = 0;
+    memset(&s_pose_cache, 0, sizeof(s_pose_cache));
+    memset(&s_locate_cost, 0, sizeof(s_locate_cost));
+    s_img_projection = false;
+    s_layer_said = -1;
+    vr_nearfield_start();
     c->initialized = true;
+    vr_worldproj_set_pose_source(wp_pose_source);
     qemu_thread_create(&c->pacer, "vr-pacer", pacer_thread_main, c,
                        QEMU_THREAD_JOINABLE);
     c->pacer_started = true;
 
-    fprintf(stderr, "xemu-vr: compositor initialized (%u copy command "
+    fprintf(stderr, "PenguinBox: compositor initialized (%u copy command "
                     "buffers; swapchain created on first frame).\n",
             VR_COMP_NUM_CMD_BUFFERS);
     return true;
@@ -988,6 +1164,9 @@ void vr_compositor_stop(void)
         return;
     }
 
+    vr_worldproj_set_pose_source(NULL);
+    vr_worldproj_invalidate();
+    s_img_projection = false;
     qatomic_set(&c->pacer_exit, true);
 
     if (g_xemu_vr.xr.session != XR_NULL_HANDLE) {
@@ -999,7 +1178,7 @@ void vr_compositor_stop(void)
                 break;
             }
             if (g_get_monotonic_time() >= deadline) {
-                fprintf(stderr, "xemu-vr: pacer did not exit within 2s "
+                fprintf(stderr, "PenguinBox: pacer did not exit within 2s "
                                 "during shutdown; joining anyway.\n");
                 break;
             }
@@ -1019,8 +1198,10 @@ void vr_compositor_stop(void)
     }
 
     wait_all_fences(c);
+    vr_nearfield_stop();
     destroy_swapchains(c);
     destroy_panel(c);
+    vr_ui_panel_destroy(c);
 
     for (uint32_t i = 0; i < VR_COMP_NUM_CMD_BUFFERS; i++) {
         if (c->fences[i] != VK_NULL_HANDLE) {
@@ -1043,16 +1224,277 @@ void vr_compositor_stop(void)
     c->queue = VK_NULL_HANDLE;
 
     c->initialized = false;
-    fprintf(stderr, "xemu-vr: compositor shut down.\n");
+    fprintf(stderr, "PenguinBox: compositor shut down.\n");
 }
 
-void vr_compositor_frame(PGRAPHState *pg)
+static XrVector3f quat_rotate(XrQuaternionf q, XrVector3f v)
+{
+    const XrVector3f qv = { q.x, q.y, q.z };
+    const XrVector3f t = {
+        2.0f * (qv.y * v.z - qv.z * v.y),
+        2.0f * (qv.z * v.x - qv.x * v.z),
+        2.0f * (qv.x * v.y - qv.y * v.x),
+    };
+    return (XrVector3f){
+        v.x + q.w * t.x + (qv.y * t.z - qv.z * t.y),
+        v.y + q.w * t.y + (qv.z * t.x - qv.x * t.z),
+        v.z + q.w * t.z + (qv.x * t.y - qv.y * t.x),
+    };
+}
+
+static float v3_dot(XrVector3f a, XrVector3f b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static XrVector3f v3_sub(XrVector3f a, XrVector3f b)
+{
+    return (XrVector3f){ a.x - b.x, a.y - b.y, a.z - b.z };
+}
+
+static void panel_compute_pose(const VRCompositor *c, XrVector3f *out_pos,
+                               XrQuaternionf *out_orient, float *out_w,
+                               float *out_h)
+{
+    const float distance = g_config.vr.sbc_panel_distance;
+    const float drop = g_config.vr.sbc_panel_drop;
+    const float width = g_config.vr.sbc_panel_width_m;
+    const float tilt_rad =
+        g_config.vr.sbc_panel_tilt_deg * (3.14159265f / 180.0f);
+    const XrQuaternionf q_pitch = {
+        -sinf(tilt_rad * 0.5f), 0.0f, 0.0f, cosf(tilt_rad * 0.5f),
+    };
+
+    XrVector3f pos;
+    XrQuaternionf orient;
+    switch (g_config.vr.sbc_panel_anchor) {
+    case CONFIG_VR_SBC_PANEL_ANCHOR_WORLD:
+        pos = (XrVector3f){ 0.0f, -drop, -distance };
+        orient = q_pitch;
+        break;
+    case CONFIG_VR_SBC_PANEL_ANCHOR_SCREEN: {
+        const XrQuaternionf rq = c->recenter_pose.orientation;
+        const XrVector3f rp = c->recenter_pose.position;
+        const float sin_yaw = 2.0f * rq.w * rq.y;
+        const float cos_yaw = 1.0f - 2.0f * rq.y * rq.y;
+        const float sdist = g_config.vr.screen_distance;
+        const float svoff = g_config.vr.screen_vertical_offset;
+        pos = (XrVector3f){
+            rp.x - sdist * sin_yaw,
+            rp.y + svoff - drop,
+            rp.z - sdist * cos_yaw,
+        };
+        orient = rq;
+        break;
+    }
+    case CONFIG_VR_SBC_PANEL_ANCHOR_CONSOLE:
+    default: {
+        const XrQuaternionf rq = c->recenter_pose.orientation;
+        const XrVector3f rp = c->recenter_pose.position;
+        const float sin_yaw = 2.0f * rq.w * rq.y;
+        const float cos_yaw = 1.0f - 2.0f * rq.y * rq.y;
+        pos = (XrVector3f){
+            rp.x - distance * sin_yaw,
+            rp.y - drop,
+            rp.z - distance * cos_yaw,
+        };
+        orient = quat_mul(rq, q_pitch);
+        break;
+    }
+    }
+
+    *out_pos = pos;
+    *out_orient = orient;
+    *out_w = width;
+    *out_h = width * (float)VR_SBC_PANEL_H / (float)VR_SBC_PANEL_W;
+}
+
+static bool s_panel_visible;
+
+#define POKE_PRESS_M   0.005f
+#define POKE_RELEASE_M 0.015f
+#define POKE_HOVER_M   0.10f
+#define POKE_DEPTH_M   0.08f
+
+enum { PRESS_NONE, PRESS_SELECT, PRESS_POKE };
+
+static void panel_probe_input(VRCompositor *c, XrTime t)
+{
+    static int last_cell[VR_INPUT_NUM_HANDS] = { -1, -1 };
+    static int pressed_cell[VR_INPUT_NUM_HANDS] = { -1, -1 };
+    static int press_src[VR_INPUT_NUM_HANDS];
+    static bool poke_armed[VR_INPUT_NUM_HANDS];
+
+    vr_input_frame(t);
+
+
+    if (c->panel_chain.swapchain == XR_NULL_HANDLE || !s_panel_visible) {
+        for (int h = 0; h < VR_INPUT_NUM_HANDS; h++) {
+            if (pressed_cell[h] >= 0) {
+                size_t nc = 0;
+                const VrSbcPanelCell *cl = vr_sbc_panel_cells(&nc);
+                vr_sbc_panel_inject(cl[pressed_cell[h]].id, false);
+                pressed_cell[h] = -1;
+            }
+            press_src[h] = PRESS_NONE;
+            poke_armed[h] = false;
+            last_cell[h] = -1;
+            vr_sbc_panel_set_pointer(h, -1, -1, -1, false);
+        }
+        return;
+    }
+
+    size_t ncells = 0;
+    const VrSbcPanelCell *cells = vr_sbc_panel_cells(&ncells);
+
+    XrVector3f ppos;
+    XrQuaternionf porient;
+    float pw, ph;
+    panel_compute_pose(c, &ppos, &porient, &pw, &ph);
+    const XrVector3f n = quat_rotate(porient, (XrVector3f){ 0, 0, 1 });
+
+    const XrVector3f ax = quat_rotate(porient, (XrVector3f){ 1, 0, 0 });
+    const XrVector3f ay = quat_rotate(porient, (XrVector3f){ 0, 1, 0 });
+
+    for (int h = 0; h < VR_INPUT_NUM_HANDS; h++) {
+        VrHandState hs;
+        int idx = -1;
+        int hit_px = -1, hit_py = -1;
+        const bool have_hand = vr_input_hand(h, &hs);
+
+        bool poke_near = false;
+        bool poke_touch = false;
+        bool poke_inside = false;
+        float poke_d = 0.0f;
+        int poke_cell = -1;
+        if (have_hand && hs.poke_valid) {
+            const XrVector3f rel = v3_sub(hs.poke.position, ppos);
+            poke_d = v3_dot(n, rel);
+            const float u = v3_dot(rel, ax) / pw + 0.5f;
+            const float v = 0.5f - v3_dot(rel, ay) / ph;
+            poke_inside = u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f;
+            if (poke_inside && poke_d < POKE_HOVER_M && poke_d > -POKE_DEPTH_M) {
+                const int px = (int)(u * VR_SBC_PANEL_W);
+                const int py = (int)(v * VR_SBC_PANEL_H);
+                poke_near = true;
+                poke_touch = poke_d <= POKE_PRESS_M;
+                hit_px = px;
+                hit_py = py;
+                for (size_t i = 0; i < ncells; i++) {
+                    const VrSbcPanelCell *cl = &cells[i];
+                    if (px >= cl->x && px < cl->x + cl->w &&
+                        py >= cl->y && py < cl->y + cl->h) {
+                        poke_cell = (int)i;
+                        break;
+                    }
+                }
+                idx = poke_cell;
+                if (idx != last_cell[h]) {
+                    fprintf(stderr,
+                            "xemu-vr: input: hand %d finger @ %d,%d -> %s\n",
+                            h, px, py, idx >= 0 ? cells[idx].id : "(gap)");
+                }
+            }
+        }
+
+        if (!poke_near && have_hand && hs.aim_valid) {
+            const XrVector3f ro = hs.aim.position;
+            const XrVector3f rd =
+                quat_rotate(hs.aim.orientation, (XrVector3f){ 0, 0, -1 });
+
+            const float denom = v3_dot(n, rd);
+            if (denom < -1e-6f) {
+                const float along = v3_dot(n, v3_sub(ppos, ro)) / denom;
+                if (along > 0.0f) {
+                    const XrVector3f hit = {
+                        ro.x + rd.x * along,
+                        ro.y + rd.y * along,
+                        ro.z + rd.z * along,
+                    };
+                    const XrVector3f rel = v3_sub(hit, ppos);
+                    const float lx = v3_dot(
+                        rel, quat_rotate(porient, (XrVector3f){ 1, 0, 0 }));
+                    const float ly = v3_dot(
+                        rel, quat_rotate(porient, (XrVector3f){ 0, 1, 0 }));
+                    const float u = lx / pw + 0.5f;
+                    const float v = 0.5f - ly / ph;
+                    if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
+                        const int px = (int)(u * VR_SBC_PANEL_W);
+                        const int py = (int)(v * VR_SBC_PANEL_H);
+                        hit_px = px;
+                        hit_py = py;
+                        for (size_t i = 0; i < ncells; i++) {
+                            const VrSbcPanelCell *cl = &cells[i];
+                            if (px >= cl->x && px < cl->x + cl->w &&
+                                py >= cl->y && py < cl->y + cl->h) {
+                                idx = (int)i;
+                                break;
+                            }
+                        }
+                        if (idx != last_cell[h]) {
+                            fprintf(stderr,
+                                    "xemu-vr: input: hand %d @ %d,%d -> %s\n",
+                                    h, px, py,
+                                    idx >= 0 ? cells[idx].id : "(gap)");
+                        }
+                    }
+                }
+            }
+        }
+
+        if (idx != last_cell[h] && idx == -1 && last_cell[h] >= 0) {
+            fprintf(stderr, "xemu-vr: input: hand %d left the panel\n", h);
+        }
+        last_cell[h] = idx;
+
+        if (press_src[h] == PRESS_POKE &&
+            (!have_hand || !hs.poke_valid || !poke_inside ||
+             poke_d > POKE_RELEASE_M || poke_d <= -POKE_DEPTH_M)) {
+            vr_sbc_panel_inject(cells[pressed_cell[h]].id, false);
+            pressed_cell[h] = -1;
+            press_src[h] = PRESS_NONE;
+        }
+        if (!have_hand || !hs.poke_valid || !poke_inside) {
+            poke_armed[h] = false;
+        } else if (poke_d > POKE_RELEASE_M) {
+            poke_armed[h] = true;
+        }
+        if (press_src[h] == PRESS_NONE && poke_armed[h] && poke_touch &&
+            poke_cell >= 0) {
+            pressed_cell[h] = poke_cell;
+            press_src[h] = PRESS_POKE;
+            poke_armed[h] = false;
+            vr_sbc_panel_inject(cells[poke_cell].id, true);
+        }
+
+        if (have_hand && hs.select_changed) {
+            if (hs.select) {
+                if (idx >= 0 && press_src[h] == PRESS_NONE) {
+                    pressed_cell[h] = idx;
+                    press_src[h] = PRESS_SELECT;
+                    vr_sbc_panel_inject(cells[idx].id, true);
+                }
+            } else if (press_src[h] == PRESS_SELECT) {
+                vr_sbc_panel_inject(cells[pressed_cell[h]].id, false);
+                pressed_cell[h] = -1;
+                press_src[h] = PRESS_NONE;
+            }
+        }
+
+        vr_sbc_panel_set_pointer(
+            h, hit_px, hit_py,
+            pressed_cell[h] >= 0 ? pressed_cell[h] : idx,
+            pressed_cell[h] >= 0);
+    }
+}
+
+static bool compositor_visit(PGRAPHState *pg, bool pause_tick)
 {
     VRCompositor *c = &g_xemu_vr.comp;
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     if (!c->initialized) {
-        return;
+        return false;
     }
 
     if (c->begin_owed) {
@@ -1063,37 +1505,39 @@ void vr_compositor_frame(PGRAPHState *pg)
     qemu_mutex_lock(&vr_frame_mutex);
     if (!c->has_pending_frame) {
         qemu_mutex_unlock(&vr_frame_mutex);
-        return;
+        return false;
     }
     fs = c->pending_frame_state;
     c->has_pending_frame = false;
     qemu_mutex_unlock(&vr_frame_mutex);
 
     if (!vr_xr_session_running()) {
-        return;
+        return false;
     }
+
+    panel_probe_input(c, fs.predictedDisplayTime);
 
     const XrSession session = g_xemu_vr.xr.session;
 
     if (!settle_owed_begin(c, session)) {
         c->begin_owed_display_time = fs.predictedDisplayTime;
-        return;
+        return false;
     }
 
     XrFrameBeginInfo bi = { .type = XR_TYPE_FRAME_BEGIN_INFO };
     XrResult res = xr_pfn.BeginFrame(session, &bi);
     if (XR_FAILED(res)) {
         if (res == XR_ERROR_SESSION_NOT_RUNNING) {
-            return;
+            return false;
         }
         if (!c->warned_beginframe) {
             c->warned_beginframe = true;
-            fprintf(stderr, "xemu-vr: xrBeginFrame failed (%d); will retry "
+            fprintf(stderr, "PenguinBox: xrBeginFrame failed (%d); will retry "
                             "the begin/end pairing.\n", (int)res);
         }
         c->begin_owed = true;
         c->begin_owed_display_time = fs.predictedDisplayTime;
-        return;
+        return false;
     }
 
     if (c->view_space != XR_NULL_HANDLE) {
@@ -1109,36 +1553,44 @@ void vr_compositor_frame(PGRAPHState *pg)
     }
 
     if (qatomic_xchg(&c->recenter_requested, false) && c->head_pose_valid) {
-        const XrQuaternionf q = c->head_pose.orientation;
-        float yaw = atan2f(2.0f * (q.x * q.z + q.w * q.y),
-                           1.0f - 2.0f * (q.x * q.x + q.y * q.y));
-        c->recenter_pose.orientation =
-            (XrQuaternionf){ 0.0f, sinf(yaw * 0.5f), 0.0f, cosf(yaw * 0.5f) };
-        c->recenter_pose.position = c->head_pose.position;
-        vr_camera_reset();
-        fprintf(stderr, "xemu-vr: recentered (yaw %.1f deg, eye height "
-                        "%.2f m).\n", yaw * (180.0f / 3.14159265f),
-                c->head_pose.position.y);
+        apply_recenter(c, c->head_pose);
     }
 
-    vr_camera_frame(pg);
+    vr_ui_panel_frame(c, pg, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+
+    if (!pause_tick) {
+        vr_camera_frame(pg);
+    }
 
     PGRAPHVkDisplayState *disp = &r->display;
-    VkImage frame_image = disp->present_published_valid ?
+    const bool stereo = pgraph_vk_stereo_on() &&
+                        disp->eyes_image != VK_NULL_HANDLE;
+    VkImage frame_image = stereo ? disp->eyes_image :
+                          disp->present_published_valid ?
                               disp->present_published_image : disp->image;
     const bool have_frame = frame_image != VK_NULL_HANDLE &&
                             disp->width > 0 && disp->height > 0;
+    int eyes_fault = 0;
+    const VrEyesPlan plan = vr_eyes_plan(stereo, eyes_fault);
     bool force_zero_layers = false;
-    if (fs.shouldRender && have_frame) {
+    if (!pause_tick && fs.shouldRender && have_frame) {
         uint32_t w = (uint32_t)disp->width;
         uint32_t h = (uint32_t)disp->height;
-        if (ensure_swapchains(c, w, h)) {
-            VRCopyResult cr =
-                copy_to_swapchain(c, frame_image, &c->chains[0]);
-            if (cr == VR_COPY_COPIED) {
-                c->chains[0].ever_released = true;
-            } else if (cr == VR_COPY_TIMEOUT_ZERO_LAYER) {
-                force_zero_layers = true;
+        if (ensure_swapchains(c, w, h, plan.chains)) {
+            for (uint32_t k = 0; k < plan.chains; k++) {
+                VRCopyResult cr = copy_to_swapchain(
+                    c, frame_image, plan.src_layer[k], &c->chains[k]);
+                if (cr == VR_COPY_COPIED) {
+                    c->chains[k].ever_released = true;
+                    if (k == 0) {
+                        VrWpStampSource src =
+                            vr_worldproj_presented(&s_img_stamp);
+                        s_img_projection =
+                            vr_wp_stamp_is_projection(src, &s_img_stamp);
+                    }
+                } else if (cr == VR_COPY_TIMEOUT_ZERO_LAYER) {
+                    force_zero_layers = true;
+                }
             }
         }
     }
@@ -1156,7 +1608,7 @@ void vr_compositor_frame(PGRAPHState *pg)
                 staging_free = false;
                 if (!c->warned_panel_upload) {
                     c->warned_panel_upload = true;
-                    fprintf(stderr, "xemu-vr: panel copy fence wait returned "
+                    fprintf(stderr, "PenguinBox: panel copy fence wait returned "
                                     "%d; skipping panel upload.\n", (int)wr);
                 }
             }
@@ -1183,12 +1635,28 @@ void vr_compositor_frame(PGRAPHState *pg)
     XrCompositionLayerCylinderKHR cyl = {
         .type = XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR,
     };
+    XrCompositionLayerQuad quads[2];
+    XrCompositionLayerCylinderKHR cyls[2];
     XrCompositionLayerQuad panel_quad = {
         .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
     };
-    const XrCompositionLayerBaseHeader *layers[2] = { NULL, NULL };
+    XrCompositionLayerProjection proj = {
+        .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION,
+    };
+    XrCompositionLayerProjectionView proj_views[2];
+    XrCompositionLayerQuad ui_quad = { .type = XR_TYPE_COMPOSITION_LAYER_QUAD };
+    const XrCompositionLayerBaseHeader *layers[VR_XR_MAX_LAYERS] = { NULL };
     uint32_t layer_count = 0;
-    if (!force_zero_layers && c->chains[0].ever_released) {
+
+    XrCompositionLayerProjection nf_layer;
+    XrCompositionLayerProjectionView nf_views[2];
+    const bool nf_show = vr_nearfield_frame(pg, fs.predictedDisplayTime,
+                                            fs.shouldRender, &nf_layer, nf_views);
+    const XrSwapchain chain_handles[2] = { c->chains[0].swapchain,
+                                           c->chains[1].swapchain };
+    const bool chains_ready = c->chains[0].ever_released &&
+                              (!stereo || c->chains[1].ever_released);
+    if (!force_zero_layers && chains_ready) {
         const float distance = g_config.vr.screen_distance;
         const float height = g_config.vr.screen_height;
         const float arc_deg = g_config.vr.screen_arc;
@@ -1210,7 +1678,37 @@ void vr_compositor_frame(PGRAPHState *pg)
         const float sin_yaw = 2.0f * rq.w * rq.y;
         const float cos_yaw = 1.0f - 2.0f * rq.y * rq.y;
 
-        if (curved) {
+        if (s_img_projection) {
+            const XrPosef pose = {
+                .orientation = { (float)s_img_stamp.xr_q[0],
+                                 (float)s_img_stamp.xr_q[1],
+                                 (float)s_img_stamp.xr_q[2],
+                                 (float)s_img_stamp.xr_q[3] },
+                .position = { (float)s_img_stamp.xr_p[0],
+                              (float)s_img_stamp.xr_p[1],
+                              (float)s_img_stamp.xr_p[2] },
+            };
+            double a[4];
+            vr_wp_fov_angles(s_img_stamp.tan, a);
+            const XrFovf fov = {
+                .angleLeft = (float)a[0],
+                .angleRight = (float)a[1],
+                .angleUp = (float)a[2],
+                .angleDown = (float)a[3],
+            };
+            const XrCompositionLayerProjectionView view = {
+                .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW,
+                .pose = pose,
+                .fov = fov,
+                .subImage = sub_image,
+            };
+            vr_eyes_proj_views(stereo, &view, chain_handles, proj_views);
+            proj.layerFlags = 0;
+            proj.space = g_xemu_vr.xr.space;
+            proj.viewCount = 2;
+            proj.views = proj_views;
+            layers[layer_count++] = (const XrCompositionLayerBaseHeader *)&proj;
+        } else if (curved) {
             cyl.layerFlags = 0;
             cyl.space = g_xemu_vr.xr.space;
             cyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -1221,7 +1719,11 @@ void vr_compositor_frame(PGRAPHState *pg)
             cyl.radius = distance;
             cyl.centralAngle = arc_deg * (3.14159265f / 180.0f);
             cyl.aspectRatio = aspect;
-            layers[0] = (const XrCompositionLayerBaseHeader *)&cyl;
+            uint32_t n = vr_eyes_cylinders(stereo, &cyl, chain_handles, cyls);
+            for (uint32_t i = 0; i < n; i++) {
+                layers[layer_count++] =
+                    (const XrCompositionLayerBaseHeader *)&cyls[i];
+            }
         } else {
             quad.layerFlags = 0;
             quad.space = g_xemu_vr.xr.space;
@@ -1234,58 +1736,35 @@ void vr_compositor_frame(PGRAPHState *pg)
                 rp.z - distance * cos_yaw,
             };
             quad.size = (XrExtent2Df){ height * aspect, height };
-            layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
+            uint32_t n = vr_eyes_quads(stereo, &quad, chain_handles, quads);
+            for (uint32_t i = 0; i < n; i++) {
+                layers[layer_count++] =
+                    (const XrCompositionLayerBaseHeader *)&quads[i];
+            }
         }
-        layer_count = 1;
+        const int said = (int)s_img_projection | (stereo ? 2 : 0);
+        if (s_layer_said != said) {
+            char eyes[128] = "";
+            if (stereo) {
+                snprintf(eyes, sizeof(eyes),
+                         ", two eyes: LEFT <- chains[0] (eye layer %u), "
+                         "RIGHT <- chains[1] (eye layer %u)",
+                         plan.src_layer[0], plan.src_layer[1]);
+            }
+            fprintf(stderr, "xemu-vr: screen layer: %s%s%s\n",
+                    s_img_projection ? "projection (free projection, stamp "
+                                     : (curved ? "cylinder" : "quad"),
+                    s_img_projection ? "declared)" : "", eyes);
+            s_layer_said = said;
+        }
     }
 
+    s_panel_visible = panel_show;
     if (panel_show) {
-        const float distance = g_config.vr.sbc_panel_distance;
-        const float drop = g_config.vr.sbc_panel_drop;
-        const float width = g_config.vr.sbc_panel_width_m;
-        const float tilt_rad =
-            g_config.vr.sbc_panel_tilt_deg * (3.14159265f / 180.0f);
-        const XrQuaternionf q_pitch = {
-            -sinf(tilt_rad * 0.5f), 0.0f, 0.0f, cosf(tilt_rad * 0.5f),
-        };
-
         XrVector3f pos;
         XrQuaternionf orient;
-        switch (g_config.vr.sbc_panel_anchor) {
-        case CONFIG_VR_SBC_PANEL_ANCHOR_WORLD:
-            pos = (XrVector3f){ 0.0f, -drop, -distance };
-            orient = q_pitch;
-            break;
-        case CONFIG_VR_SBC_PANEL_ANCHOR_SCREEN: {
-            const XrQuaternionf rq = c->recenter_pose.orientation;
-            const XrVector3f rp = c->recenter_pose.position;
-            const float sin_yaw = 2.0f * rq.w * rq.y;
-            const float cos_yaw = 1.0f - 2.0f * rq.y * rq.y;
-            const float sdist = g_config.vr.screen_distance;
-            const float svoff = g_config.vr.screen_vertical_offset;
-            pos = (XrVector3f){
-                rp.x - sdist * sin_yaw,
-                rp.y + svoff - drop,
-                rp.z - sdist * cos_yaw,
-            };
-            orient = rq;
-            break;
-        }
-        case CONFIG_VR_SBC_PANEL_ANCHOR_CONSOLE:
-        default: {
-            const XrQuaternionf rq = c->recenter_pose.orientation;
-            const XrVector3f rp = c->recenter_pose.position;
-            const float sin_yaw = 2.0f * rq.w * rq.y;
-            const float cos_yaw = 1.0f - 2.0f * rq.y * rq.y;
-            pos = (XrVector3f){
-                rp.x - distance * sin_yaw,
-                rp.y - drop,
-                rp.z - distance * cos_yaw,
-            };
-            orient = quat_mul(rq, q_pitch);
-            break;
-        }
-        }
+        float width, height_m;
+        panel_compute_pose(c, &pos, &orient, &width, &height_m);
 
         panel_quad.layerFlags =
             XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
@@ -1299,11 +1778,38 @@ void vr_compositor_frame(PGRAPHState *pg)
         };
         panel_quad.pose.orientation = orient;
         panel_quad.pose.position = pos;
-        panel_quad.size = (XrExtent2Df){
-            width, width * (float)VR_SBC_PANEL_H / (float)VR_SBC_PANEL_W,
-        };
+        panel_quad.size = (XrExtent2Df){ width, height_m };
         layers[layer_count++] =
             (const XrCompositionLayerBaseHeader *)&panel_quad;
+    }
+
+    if (layer_count < sizeof(layers) / sizeof(layers[0]) &&
+        vr_ui_panel_layer(c, &ui_quad)) {
+        layers[layer_count++] = (const XrCompositionLayerBaseHeader *)&ui_quad;
+    }
+
+    bool nf_appended = false;
+    if (nf_show) {
+        uint32_t budget = VR_XR_MAX_LAYERS;
+        if (g_xemu_vr.xr.max_layer_count &&
+            g_xemu_vr.xr.max_layer_count < budget) {
+            budget = g_xemu_vr.xr.max_layer_count;
+        }
+        if (layer_count + 1 <= budget) {
+            layers[layer_count++] =
+                (const XrCompositionLayerBaseHeader *)&nf_layer;
+            nf_appended = true;
+        }
+    }
+    if (nf_appended) {
+        vr_nearfield_submitted(layer_count);
+    }
+
+    {
+        static uint32_t s_submits;
+        if ((s_submits++ % 300) == 0) {
+            fprintf(stderr, "PenguinBox: layers=%u\n", layer_count);
+        }
     }
 
     XrFrameEndInfo ei = {
@@ -1316,6 +1822,17 @@ void vr_compositor_frame(PGRAPHState *pg)
     res = xr_pfn.EndFrame(session, &ei);
     if (XR_FAILED(res) && !c->warned_endframe) {
         c->warned_endframe = true;
-        fprintf(stderr, "xemu-vr: xrEndFrame failed (%d).\n", (int)res);
+        fprintf(stderr, "PenguinBox: xrEndFrame failed (%d).\n", (int)res);
     }
+    return true;
+}
+
+void vr_compositor_frame(PGRAPHState *pg)
+{
+    (void)compositor_visit(pg, false);
+}
+
+bool vr_compositor_pause_frame(PGRAPHState *pg)
+{
+    return compositor_visit(pg, true);
 }

@@ -29,8 +29,12 @@
 #include "qemu/config-file.h"
 
 #include "xemu-input.h"
+#include "hw/xbox/nv2a/pgraph/vk/vr_sbc_panel.h"
 #include "xemu-notifications.h"
 #include "xemu-settings.h"
+#include "xemu-sbc-device.h"
+#include "xemu-sim-port.h"
+#include "qom/object.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -261,6 +265,9 @@ static const char *get_bound_driver(int port)
 
 static const int port_map[4] = { 3, 4, 1, 2 };
 
+static int sbc_passthrough_port = -1;
+static void xemu_input_sbc_passthrough_init(void);
+
 void xemu_input_init(void)
 {
     if (g_config.input.background_input_capture) {
@@ -416,6 +423,8 @@ void xemu_input_init(void)
     }
 
     QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
+
+    xemu_input_sbc_passthrough_init();
 }
 
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start)
@@ -456,6 +465,7 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
 
 void xemu_input_process_sdl_events(const SDL_Event *event)
 {
+    xemu_sim_port_process_sdl_event(event);
     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
         DPRINTF("Controller Added: %d\n", event->gdevice.which);
 
@@ -572,6 +582,8 @@ void xemu_input_update_controller(ControllerState *state)
         xemu_input_update_sdl_kbd_controller_state(state);
     } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
         xemu_input_update_sdl_controller_state(state);
+    } else if (state->type == INPUT_DEVICE_SIM_PORT) {
+        xemu_sim_port_update(state);
     }
 
     state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
@@ -607,7 +619,8 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
             state->sbc.gearLever = 255;
 
         for (int i = 3; i < 43; i++) {
-            if (kbd[sdl_sbc_kbd_scancode_map[i]])
+            if (kbd[sdl_sbc_kbd_scancode_map[i]] ||
+                vr_sbc_panel_key_injected(sdl_sbc_kbd_scancode_map[i]))
                 state->sbc.buttons |= (1ULL << i);
         }
 
@@ -665,15 +678,18 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
         float mouseX, mouseY;
         uint32_t mouseBtn = SDL_GetMouseState(&mouseX, &mouseY);
 
-        if (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) {
-            state->sbc.buttons |= SBC_BUTTON_MAIN_WEAPON;
-        }
-        if (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) {
-            state->sbc.buttons |= SBC_BUTTON_LOCK_ON;
-        }
-        if(mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_X1) ||
-           mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_X2)) {
-            state->sbc.buttons |= SBC_BUTTON_SUB_WEAPON;
+        extern bool xemu_sbc_overlay_wants_mouse(void);
+        if (!xemu_sbc_overlay_wants_mouse()) {
+            if (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) {
+                state->sbc.buttons |= SBC_BUTTON_MAIN_WEAPON;
+            }
+            if (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) {
+                state->sbc.buttons |= SBC_BUTTON_LOCK_ON;
+            }
+            if (mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_X1) ||
+                mouseBtn & SDL_BUTTON_MASK(SDL_BUTTON_X2)) {
+                state->sbc.buttons |= SBC_BUTTON_SUB_WEAPON;
+            }
         }
 
         int32_t windowWidth, windowHeight;
@@ -987,6 +1003,14 @@ bool xemu_input_keyboard_feeds_sbc(void)
 
 void xemu_input_bind(int index, ControllerState *state, int live_apply_flag)
 {
+    if (index == sbc_passthrough_port && state != NULL) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "Port %d holds the Steel Battalion controller "
+                 "(USB passthrough): '%s' not connected there", index + 1,
+                 state->name);
+        xemu_queue_notification(buf);
+        return;
+    }
 
     if (bound_controllers[index]) {
         assert(bound_controllers[index]->device != NULL);
@@ -1269,4 +1293,72 @@ void xemu_input_reset_input_mapping(ControllerState *state)
     } else if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
         xemu_settings_reset_keyboard_mapping();
     }
+}
+
+static void xemu_input_sbc_passthrough_init(void)
+{
+    const char *env = getenv("XEMU_SBC_PASSTHROUGH");
+    bool want = env && strcmp(env, "1") == 0;
+    char detail[160], buf[256];
+    const int index = 0;
+
+    if (!want) {
+        return;
+    }
+    if (sbc_device_host_reader_armed()) {
+        fprintf(stderr, "sbc-passthrough: off: XEMU_SBC_HOST_READER owns the "
+                "controller\n");
+        return;
+    }
+    SbcDeviceStatus st = sbc_device_probe(detail, sizeof(detail));
+    if (st == SBC_DEV_ABSENT) {
+        return;
+    }
+    fprintf(stderr, "sbc-passthrough: %s\n", detail);
+    if (st == SBC_DEV_NO_PERMISSION) {
+        xemu_queue_notification("Steel Battalion controller found, but this "
+                                "user may not open it. Run the AppImage once "
+                                "with --install-sbc-rules, then replug it.");
+        return;
+    }
+    if (st != SBC_DEV_READY) {
+        snprintf(buf, sizeof(buf), "Steel Battalion controller found but not "
+                 "usable: %s", detail);
+        xemu_queue_notification(buf);
+        return;
+    }
+    if (!object_class_by_name("usb-host")) {
+        xemu_queue_notification("Steel Battalion controller found, but this "
+                                "build has no USB passthrough (no libusb)");
+        return;
+    }
+
+    xemu_input_bind(index, NULL, 0);
+
+    QDict *qdict = qdict_new();
+    qdict_put_str(qdict, "driver", "usb-host");
+    qdict_put_str(qdict, "id", "sbc_passthrough");
+    qdict_put_str(qdict, "vendorid", "0x0a7b");
+    qdict_put_str(qdict, "productid", "0xd000");
+    char *port = g_strdup_printf("1.%d", port_map[index]);
+    qdict_put_str(qdict, "port", port);
+    Error *err = NULL;
+    QemuOpts *opts = qemu_opts_from_qdict(qemu_find_opts("device"), qdict, &err);
+    DeviceState *dev = opts ? qdev_device_add(opts, &err) : NULL;
+    if (!dev) {
+        snprintf(buf, sizeof(buf), "Steel Battalion controller: USB passthrough "
+                 "failed: %s", err ? error_get_pretty(err) : "unknown error");
+        xemu_queue_notification(buf);
+        fprintf(stderr, "sbc-passthrough: %s\n", buf);
+        error_free(err);
+    } else {
+        sbc_passthrough_port = index;
+        object_unref(OBJECT(dev));
+        snprintf(buf, sizeof(buf), "Steel Battalion controller connected to "
+                 "port %d (USB passthrough)", index + 1);
+        xemu_queue_notification(buf);
+        fprintf(stderr, "sbc-passthrough: attached at usb port %s\n", port);
+    }
+    g_free(port);
+    qobject_unref(qdict);
 }

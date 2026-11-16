@@ -39,8 +39,70 @@
 #define runstate_is_running()  true
 #else
 #include "system/runstate.h"
+#include "system/physmem.h"
+#include "system/memory.h"
+#include "qemu/fast-hash.h"
+#include "exec/icount.h"
+#include "hw/boards.h"
 #endif
 #include "trace.h"
+#ifdef XBOX
+#include "qemu/thread.h"
+static bool xbox_tb_overlap_lever(void)
+{
+    static int st = -1;
+    if (st < 0) {
+        const char *e = getenv("XEMU_TB_PAGEINV_OVERLAP");
+        st = (e && *e && strcmp(e, "0")) ? 1 : 0;
+        if (st) {
+            fprintf(stderr, "xemu: XEMU_TB_PAGEINV_OVERLAP=1 -- only overlapping TBs are invalidated\n");
+        }
+    }
+    return st;
+}
+
+static int xbox_tb_lazyval_st = -1;
+#ifndef CONFIG_USER_ONLY
+static unsigned xbox_tb_lazyval_vcpus(void)
+{
+    unsigned n = current_machine ? current_machine->smp.max_cpus : 1;
+    return n;
+}
+#endif
+static int xbox_tb_lazyval_level(void)
+{
+    if (unlikely(xbox_tb_lazyval_st < 0)) {
+        const char *e = getenv("XEMU_TB_LAZYVAL");
+        int lv = (e && *e && strcmp(e, "0")) ? (strcmp(e, "2") ? 1 : 2) : 0;
+
+#ifndef CONFIG_USER_ONLY
+        if (lv && icount_enabled()) {
+            fprintf(stderr, "xemu: XEMU_TB_LAZYVAL=%s REFUSED under -icount: lazy TB validation stays off\n", e);
+            lv = 0;
+        }
+        if (lv && xbox_tb_lazyval_vcpus() > 1) {
+            fprintf(stderr, "xemu: XEMU_TB_LAZYVAL=%s REFUSED with %u vCPUs: lazy TB validation stays off "
+                    "(it needs a single vCPU)\n", e, xbox_tb_lazyval_vcpus());
+            lv = 0;
+        }
+#endif
+        if (lv) {
+            fprintf(stderr, "xemu: XEMU_TB_LAZYVAL=%d -- lazy TB validation (stage 1): a data store onto a code page "
+                    "marks the page's TBs stale; a stale TB is byte-verified before it next runs%s\n", lv,
+                    lv == 2 ? " (also device writes made on the vCPU thread)" : "");
+        }
+        xbox_tb_lazyval_st = lv;
+    }
+    return xbox_tb_lazyval_st;
+}
+static bool xbox_tb_lazyval(void)
+{
+    return xbox_tb_lazyval_level() != 0;
+}
+#endif
+enum { TBLV_SRC_STORE, TBLV_SRC_DEV_VCPU, TBLV_SRC_DEV_OTHER, TBLV_SRC_API };
+#define tblv_add(k, n) do { } while (0)
+#define tblv_fault(f) false
 
 #define TB_FOR_EACH_TAGGED(head, tb, n, field)                          \
     for (n = (head) & 1, tb = (TranslationBlock *)((head) & ~1);        \
@@ -617,6 +679,16 @@ static void tb_page_add(PageDesc *p, TranslationBlock *tb, unsigned int n)
     if (!page_already_protected) {
         tlb_protect_code(tb->page_addr[n] & TARGET_PAGE_MASK);
     }
+#ifdef XBOX
+    else if (xbox_tb_lazyval() && !tblv_fault(TBLV_SAB_NOPAGEADD)) {
+        tb_page_addr_t page = tb->page_addr[n] & TARGET_PAGE_MASK;
+
+        if (physical_memory_get_dirty_flag(page, DIRTY_MEMORY_CODE)) {
+            tblv_add(TBLV_PAGEADD_PROTECT, 1);
+            tlb_protect_code(page);
+        }
+    }
+#endif
 }
 
 static void tb_record(TranslationBlock *tb)
@@ -722,7 +794,7 @@ static inline void tb_remove_from_jmp_list(TranslationBlock *orig, int n_orig)
     ptr_locked = qatomic_read(&orig->jmp_dest[n_orig]);
     if (ptr_locked != ptr) {
         qemu_spin_unlock(&dest->jmp_lock);
-        g_assert(ptr_locked == 1 && dest->cflags & CF_INVALID);
+        g_assert(ptr_locked == 1 && dest->cflags & (CF_INVALID | CF_STALE));
         return;
     }
     if (dest == orig) {
@@ -793,12 +865,12 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
     assert_memory_lock();
 
     qemu_spin_lock(&tb->jmp_lock);
-    qatomic_set(&tb->cflags, tb->cflags | CF_INVALID);
+    qatomic_set(&tb->cflags, (tb->cflags & ~CF_STALE) | CF_INVALID);
     qemu_spin_unlock(&tb->jmp_lock);
 
     phys_pc = tb_page_addr0(tb);
     h = tb_hash_func(phys_pc, (orig_cflags & CF_PCREL ? 0 : tb->pc),
-                     tb->flags, tb->cs_base, orig_cflags);
+                     tb->flags, tb->cs_base, orig_cflags & ~CF_STALE);
     if (!qht_remove(&tb_ctx.htable, tb, h)) {
         return;
     }
@@ -839,13 +911,160 @@ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
     }
 }
 
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+static void tb_mark_stale(TranslationBlock *tb)
+{
+    qemu_spin_lock(&tb->jmp_lock);
+    qatomic_set(&tb->cflags, tb->cflags | CF_STALE);
+    qemu_spin_unlock(&tb->jmp_lock);
+    if (!tblv_fault(TBLV_SAB_NOUNLINK)) {
+        qemu_thread_jit_write();
+        tb_jmp_unlink(tb);
+        qemu_thread_jit_execute();
+    }
+    tblv_add(TBLV_MARK, 1);
+}
+
+struct tb_lazyval_desc {
+    CPUArchState *env;
+    vaddr pc;
+    uint64_t cs_base;
+    uint32_t flags;
+    uint32_t cflags;
+    tb_page_addr_t page_addr0;
+};
+
+static bool tb_lazyval_cmp(const void *p, const void *d)
+{
+    const TranslationBlock *tb = p;
+    const struct tb_lazyval_desc *desc = d;
+    uint32_t cf = tb_cflags(tb);
+
+    if ((cf & CF_STALE) &&
+        ((cf & CF_PCREL) || tb->pc == desc->pc) &&
+        tb_page_addr0(tb) == desc->page_addr0 &&
+        tb->cs_base == desc->cs_base &&
+        tb->flags == desc->flags &&
+        (cf & ~(CF_INVALID | CF_STALE)) == desc->cflags) {
+        tb_page_addr_t tb_phys_page1 = tb_page_addr1(tb);
+
+        if (tb_phys_page1 == -1) {
+            return true;
+        }
+        return tb_phys_page1 == get_page_addr_code(desc->env, TARGET_PAGE_ALIGN(desc->pc));
+    }
+    return false;
+}
+
+static void tb_lazyval_protect(tb_page_addr_t paddr)
+{
+    tb_page_addr_t page = paddr & TARGET_PAGE_MASK;
+
+    if (tblv_fault(TBLV_SAB_NOPROTECT)) {
+        return;
+    }
+    if (physical_memory_get_dirty_flag(page, DIRTY_MEMORY_CODE)) {
+        tblv_add(TBLV_REPROTECT, 1);
+    }
+    tlb_protect_code(page);
+}
+
+static TranslationBlock *tb_lazyval_protect_new(tb_page_addr_t phys_pc)
+{
+    tb_page_addr_t page = phys_pc & TARGET_PAGE_MASK;
+
+    if (!tblv_fault(TBLV_SAB_NOPAGEADD) && physical_memory_get_dirty_flag(page, DIRTY_MEMORY_CODE)) {
+        tblv_add(TBLV_PAGEADD_PROTECT, 1);
+        tlb_protect_code(page);
+    }
+    return NULL;
+}
+
+TranslationBlock *tb_lazyval_lookup(CPUState *cpu, vaddr pc, uint64_t cs_base, uint32_t flags, uint32_t cflags,
+                                    tb_page_addr_t phys_pc, void *host_pc)
+{
+    CPUArchState *env = cpu_env(cpu);
+    struct tb_lazyval_desc desc;
+    TranslationBlock *tb;
+    const uint8_t *b0 = host_pc, *b1 = NULL;
+    size_t len0, len1 = 0;
+    uint64_t hash;
+    uint32_t h;
+
+    if (!xbox_tb_lazyval() || phys_pc == -1 || host_pc == NULL) {
+        return NULL;
+    }
+    tcg_debug_assert(!(cflags & (CF_INVALID | CF_STALE)));
+
+    desc.env = env;
+    desc.pc = pc;
+    desc.cs_base = cs_base;
+    desc.flags = flags;
+    desc.cflags = cflags;
+    desc.page_addr0 = phys_pc;
+    h = tb_hash_func(phys_pc, (cflags & CF_PCREL ? 0 : pc), flags, cs_base, cflags);
+    tb = qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lazyval_cmp);
+    if (tb == NULL) {
+        return tb_lazyval_protect_new(phys_pc);
+    }
+
+    len0 = tb->size;
+    if (tb_page_addr1(tb) != -1) {
+        void *host1 = NULL;
+
+        len0 = TARGET_PAGE_SIZE - (phys_pc & ~TARGET_PAGE_MASK);
+        len1 = tb->size - len0;
+        get_page_addr_code_hostp(env, TARGET_PAGE_ALIGN(pc), &host1);
+        if (host1 == NULL) {
+            tb_phys_invalidate(tb, -1);
+            return tb_lazyval_protect_new(phys_pc);
+        }
+        b1 = host1;
+    }
+    g_assert(tb->size <= TARGET_PAGE_SIZE);
+
+    tb_lock_pages(tb);
+    if (tb_cflags(tb) & CF_INVALID) {
+        tb_unlock_pages(tb);
+        return tb_lazyval_protect_new(phys_pc);
+    }
+    tb_lazyval_protect(phys_pc);
+    if (len1) {
+        tb_lazyval_protect(tb_page_addr1(tb));
+    }
+    if (len1 == 0) {
+        hash = fast_hash(b0, len0);
+    } else {
+        uint8_t buf[TARGET_PAGE_SIZE];
+
+        memcpy(buf, b0, len0);
+        memcpy(buf + len0, b1, len1);
+        hash = fast_hash(buf, tb->size);
+    }
+    tblv_add(TBLV_VERIFY_BYTES, tb->size);
+
+    if (hash == tb->ihash || tblv_fault(TBLV_SAB_SKIPVERIFY)) {
+        qemu_spin_lock(&tb->jmp_lock);
+        qatomic_set(&tb->cflags, tb->cflags & ~CF_STALE);
+        qemu_spin_unlock(&tb->jmp_lock);
+        tb_unlock_pages(tb);
+        tblv_add(TBLV_VERIFY_OK, 1);
+        return tb;
+    }
+    tb_unlock_pages(tb);
+    tblv_add(TBLV_VERIFY_FAIL, 1);
+    tb_phys_invalidate(tb, -1);
+    return NULL;
+}
+#endif
+
 TranslationBlock *tb_link_page(TranslationBlock *tb)
 {
     void *existing_tb = NULL;
     uint32_t h;
 
     assert_memory_lock();
-    tcg_debug_assert(!(tb->cflags & CF_INVALID));
+    tcg_debug_assert(!(tb->cflags & (CF_INVALID | CF_STALE)));
 
     tb_record(tb);
 
@@ -928,12 +1147,16 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
                                       struct page_collection *pages,
                                       PageDesc *p, tb_page_addr_t start,
                                       tb_page_addr_t last,
-                                      uintptr_t retaddr)
+                                      uintptr_t retaddr, int src)
 {
     TranslationBlock *tb;
     PageForEachNext n;
     bool current_tb_modified = false;
     TranslationBlock *current_tb = NULL;
+#ifdef XBOX
+    const bool lazy_on = (src == TBLV_SRC_STORE && xbox_tb_lazyval()) ||
+                         (src == TBLV_SRC_DEV_VCPU && xbox_tb_lazyval_level() >= 2);
+#endif
 
     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
 
@@ -955,6 +1178,31 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
         }
         if (!(tb_last < start || tb_start > last)) {
 #else
+        bool tb_ov;
+        {
+            tb_page_addr_t tb_start = tb_page_addr0(tb);
+            tb_page_addr_t tb_last = tb_start + tb->size - 1;
+            if (n == 0) {
+                tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
+            } else {
+                tb_start = tb_page_addr1(tb);
+                tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
+            }
+            tb_ov = !(tb_last < start || tb_start > last);
+        }
+        if (!tb_ov && lazy_on) {
+            if (likely(current_tb != tb) || tblv_fault(TBLV_SAB_SKIPEXIT)) {
+                if (!(tb_cflags(tb) & CF_STALE)) {
+                    tb_mark_stale(tb);
+                }
+                continue;
+            }
+            tblv_add(TBLV_CUR_EAGER, 1);
+        } else if (!tb_ov && xbox_tb_overlap_lever()) {
+            continue;
+        } else if (lazy_on) {
+            tblv_add(TBLV_OVERLAP_EAGER, 1);
+        }
         {
 #endif
             if (unlikely(current_tb == tb) &&
@@ -969,6 +1217,12 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
     if (!p->first_tb) {
         tlb_unprotect_code(start);
     }
+#ifdef XBOX
+    else if (lazy_on) {
+        tlb_unprotect_code(start);
+        tblv_add(TBLV_EPISODES, 1);
+    }
+#endif
 
     if (unlikely(current_tb_modified)) {
         page_collection_unlock(pages);
@@ -982,6 +1236,8 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
 {
     struct page_collection *pages;
     tb_page_addr_t index, index_last;
+    const int src = cpu ? TBLV_SRC_API
+                        : (current_cpu && qemu_cpu_is_self(current_cpu)) ? TBLV_SRC_DEV_VCPU : TBLV_SRC_DEV_OTHER;
 
     pages = page_collection_lock(start, last);
 
@@ -997,8 +1253,13 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
         page_start = index << TARGET_PAGE_BITS;
         page_last = page_start | ~TARGET_PAGE_MASK;
         page_last = MIN(page_last, last);
+#ifdef XBOX
+        if (src == TBLV_SRC_DEV_VCPU && xbox_tb_lazyval_level() >= 2) {
+            page_start = MAX(page_start, start);
+        }
+#endif
         tb_invalidate_phys_page_range__locked(cpu, pages, pd,
-                                              page_start, page_last, 0);
+                                              page_start, page_last, 0, src);
     }
     page_collection_unlock(pages);
 }
@@ -1013,7 +1274,7 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
         struct page_collection *pages = page_collection_lock(start, last);
 
         tb_invalidate_phys_page_range__locked(cpu, pages, p,
-                                              start, last, ra);
+                                              start, last, ra, TBLV_SRC_STORE);
         page_collection_unlock(pages);
     }
 }

@@ -144,6 +144,51 @@ static inline void uniform_copy(ShaderUniformLayout *layout, int idx,
     }
 }
 
+static inline void uniform_copy_bulk(ShaderUniformLayout *layout, int idx,
+                                     void *values, size_t value_size,
+                                     size_t count)
+{
+    assert(idx > 0 && "invalid uniform index");
+
+    ShaderUniform *u = &layout->uniforms[idx - 1];
+    const size_t element_size = value_size * u->dim_v;
+    const size_t bytes = value_size * count;
+
+    if (bytes == 0) {
+        return;
+    }
+    if (element_size == 0 || bytes % element_size) {
+        uniform_copy(layout, idx, values, value_size, count);
+        return;
+    }
+
+    const size_t n = bytes / element_size;
+    char *p_out = uniform_ptr(layout, idx);
+    char *p_max = p_out + layout->total_size;
+    const char *p_in = (const char *)values;
+
+    assert(n <= u->dim_a);
+    if (n == 1 || u->stride == element_size) {
+        assert((p_out + bytes) <= p_max);
+        memcpy(p_out, p_in, bytes);
+        return;
+    }
+    assert((p_out + (n - 1) * u->stride + element_size) <= p_max);
+
+#define UNIFORM_COPY_BULK_EACH(SZ)                                \
+    for (size_t i = 0; i < n; i++) {                              \
+        memcpy(p_out + i * u->stride, p_in + i * (SZ), (SZ));     \
+    }
+    switch (element_size) {
+    case 4:  UNIFORM_COPY_BULK_EACH(4);  break;
+    case 8:  UNIFORM_COPY_BULK_EACH(8);  break;
+    case 12: UNIFORM_COPY_BULK_EACH(12); break;
+    case 16: UNIFORM_COPY_BULK_EACH(16); break;
+    default: UNIFORM_COPY_BULK_EACH(element_size); break;
+    }
+#undef UNIFORM_COPY_BULK_EACH
+}
+
 static inline
 void uniform1fv(ShaderUniformLayout *layout, int idx, size_t count, float *values)
 {

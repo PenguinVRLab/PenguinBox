@@ -1,0 +1,15 @@
+# BAD fixture (work/0039): profile_pgr2_racing.yaml with one change: the title id is text. Load the good set with this file IN PLACE OF
+# profile_pgr2_racing.yaml; it must be refused with GAME_TITLE_ID.
+schema: sim-profile/1
+kind: profile
+id: pgr2_racing
+name: PGR2 racing
+target: xbox_duke
+game:
+  title_id: abc
+  name: synthetic racing fixture
+bindings:
+  wheel: pgr2_wheel
+  racing_pedals: pgr2_pedals
+  th8a: pgr2_shifter
+  sinden_pedal: pedal_as_x

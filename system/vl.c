@@ -144,6 +144,8 @@
 #include "qemu/keyval.h"
 
 #include "ui/xemu-settings.h"
+#include "ui/xemu-machine-profile.h"
+#include "ui/xemu-sim-boot.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-net.h"
 #include "ui/xemu-input.h"
@@ -2781,6 +2783,8 @@ void qemu_init(int argc, char **argv)
 
     qcrypto_init(&error_fatal);
 
+    xemu_machine_profile_note_argv(argc, argv);
+
     int fake_argc = 32 + argc;
     char **fake_argv = malloc(sizeof(char*)*fake_argc);
     memset(fake_argv, 0, sizeof(char*)*fake_argc);
@@ -2861,10 +2865,6 @@ void qemu_init(int argc, char **argv)
         fake_argv[fake_argc++] = strdup(flashrom_path);
     }
 
-    int mem = ((int)g_config.sys.mem_limit + 1) * 64;
-    fake_argv[fake_argc++] = strdup("-m");
-    fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
-
     const char *hdd_path = g_config.sys.files.hdd_path;
     if (strlen(hdd_path) > 0) {
         if (xemu_check_file(hdd_path)) {
@@ -2892,6 +2892,13 @@ void qemu_init(int argc, char **argv)
             break;
         }
     }
+
+    dvd_path = xemu_sim_startup_disc(dvd_path);
+
+    int mem = xemu_machine_profile_launch_ram_mb(
+        dvd_path, ((int)g_config.sys.mem_limit + 1) * 64);
+    fake_argv[fake_argc++] = strdup("-m");
+    fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
 
     fake_argv[fake_argc++] = strdup("-drive");
     char *escaped_dvd_path = strdup_double_commas(dvd_path);
@@ -3864,4 +3871,5 @@ void qemu_init(int argc, char **argv)
         os_setup_post();
     }
     resume_mux_open();
+    xemu_machine_profile_start();
 }
