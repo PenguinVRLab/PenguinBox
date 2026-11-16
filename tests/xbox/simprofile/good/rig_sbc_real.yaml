@@ -1,0 +1,7 @@
+schema: sim-profile/1
+kind: rig
+id: sb_real
+game: { title_id: 0x43430002, name: "Steel Battalion" }
+target: steel_battalion
+devices:
+  - { profile: sbc_wire, bindings: sbc_identity }

@@ -22,6 +22,17 @@ foreach e : pfiles
   genh += t[1]
 endforeach
 
+# the near-field layer's glTF hands (hw/xbox/nv2a/pgraph/vk/vr_hands_gltf.c); their sha256 is recorded in
+# vr-assets/hands/glove-v1.1/sha256sums.txt and checked by the private nearfield tests' `make check`
+foreach e : ['glove-v1.1_left.glb', 'glove-v1.1_right.glb']
+  t = custom_target('@0@.[ch]'.format(e),
+                    output: ['@0@.c'.format(e), '@0@.h'.format(e)],
+                    input: files('vr-assets/hands/glove-v1.1/@0@'.format(e)),
+                    command: [packfile, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
+  libpfile_targets += t[0]
+  genh += t[1]
+endforeach
+
 libpfile = static_library('pdata', libpfile_targets,
                           name_suffix: 'fa')
 common_ss.add(declare_dependency(link_whole: libpfile))

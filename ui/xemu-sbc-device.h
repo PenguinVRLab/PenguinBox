@@ -1,7 +1,12 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 #ifndef XEMU_SBC_DEVICE_H
 #define XEMU_SBC_DEVICE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -64,6 +69,9 @@ bool sbc_device_synthetic_enabled(void);
 bool sbc_device_replay_file(const char *path);
 
 bool sbc_decode_report(const uint8_t *raw, uint8_t len, SbcFrame *out);
+
+SbcDeviceStatus sbc_device_probe(char *detail, size_t detail_len);
+bool sbc_device_host_reader_armed(void);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,75 @@
+# Thrustmaster HOTAS Warthog throttle (the A-10C throttle replica). Art: devices/art/warthog_throttle.svg, an
+# original schematic (docs/decisions.md S-21): the two handles and the base, both from above, front at the top.
+# The control set is the well-known one (32 buttons, one hat, five axes): two throttles with idle-lift
+# detents, the friction control, the slew mini-stick, coolie switch, mic switch, china hat, boat switch,
+# speed brake, pinky switch, left throttle button, and the base panel's toggles and buttons. A two-position
+# toggle is one button (its "on" side); a three-position toggle is two buttons, its centre is neither.
+# Positions from Thrustmaster's HOTAS Warthog Hardware User Manual, English section, ts.thrustmaster.com/download/accessories/pc/hotas/manual/HOTAS_Warthog/HOTAS_Warthog_Manual.pdf
+# (p. 5/18, button numbers; p. 8/18, the A-10C names; p. 9/18, the base), agreeing with the owner's photos
+# (2026-10-10, not in the repo). RIGHT handle: coolie and slew control (1, with push) on the front face, the
+# coolie outboard; the mic switch (2-6, with push) on the outboard end; speed brake (7/8), boat switch (9/10)
+# and china hat (11/12) down the outboard side, in that order. LEFT handle: the LTB (15) on the front face; the
+# pinky switch (13/14) out of the outboard side. Which of the owner's side sliders is which is INFERRED from
+# that order (two grey, then the red one aftmost = china hat); the manual's drawings have no colour.
+# `friction` is the grey INCR/DECR slider on the base's right edge (p. 9/18 "Throttle Friction Control",
+# p. 6/18 "Slider 0 Axis"): Thrustmaster TARGET calls it THR_FC, and it has a centre detent. The FRICTION wheel
+# at the front left is mechanical only (about ten turns from minimum to maximum) and reports nothing. Sources
+# besides the manual: the forum.dcs.world thread "HOTAS Warthog trottle Friction slider" and the avsim thread
+# "Using the grey INCR-DECR friction slider ...". UNSURE, check on the hardware: which way up each panel
+# toggle's "on" side is.
+# The owner's unit, read on the rig 2026-10-10 (tests/fixtures/udev/rig_2026-10-10_warthog_throttle.txt): 044f:0404,
+# 32 buttons, X/Y (slew), Z and RZ (the throttles), THROTTLE (the base slider), the coolie hat, no serial.
+schema: sim-profile/1
+kind: device
+id: warthog_throttle
+name: "Thrustmaster Warthog throttle"
+source: sdl_joystick
+match: { vid: 0x044f, pid: 0x0404 }
+art: devices/art/warthog_throttle.svg
+# Input ids name a control's position or function; the real button and axis codes are captured on
+# the owner's hardware with press-to-identify (work/0009, work/0010), and the descriptor ranges are
+# placeholders until then. Anchors are points in the art's viewBox.
+inputs:
+  # Axes. The axis codes (evdev ABS_*) were read on the owner's unit on 2026-10-11: X/Y 0..1023 resting at 512 (the
+  # slew), Z and RZ 0..16383 resting at 0 (the throttles), THROTTLE 0..1023 (friction). That RZ is the LEFT throttle
+  # and Z the right one is INFERRED (the usual Warthog layout) until a throttle is moved on the Calibrate page.
+  - { id: throttle_left, kind: axis, code: 5, min: -32768, rest: -32768, max: 32767, anchor: [125, 270], label: "Left throttle" }  # ABS_RZ
+  - { id: throttle_right, kind: axis, code: 2, min: -32768, rest: -32768, max: 32767, anchor: [260, 275], label: "Right throttle" }  # ABS_Z
+  - { id: friction, kind: axis, code: 6, min: -32768, rest: -32768, max: 32767, anchor: [705, 270], label: "Friction control" }  # ABS_THROTTLE
+  - { id: slew_x, kind: axis, code: 0, min: -32768, rest: 0, max: 32767, anchor: [246, 100], label: "Slew control left / right" }  # ABS_X
+  - { id: slew_y, kind: axis, code: 1, min: -32768, rest: 0, max: 32767, anchor: [240, 94], label: "Slew control up / down" }  # ABS_Y
+  # The handles
+  - { id: slew_press, kind: button, anchor: [240, 100], label: "Slew control press" }
+  - { id: coolie, kind: hat, anchor: [284, 100], label: "Coolie switch" }
+  - { id: mic_up, kind: button, anchor: [362, 122], label: "Mic switch up" }
+  - { id: mic_right, kind: button, anchor: [371, 131], label: "Mic switch right" }
+  - { id: mic_down, kind: button, anchor: [362, 140], label: "Mic switch down" }
+  - { id: mic_left, kind: button, anchor: [353, 131], label: "Mic switch left" }
+  - { id: mic_press, kind: button, anchor: [362, 131], label: "Mic switch press" }
+  - { id: china_forward, kind: button, anchor: [340, 247], label: "China hat forward" }
+  - { id: china_back, kind: button, anchor: [340, 271], label: "China hat back" }
+  - { id: boat_forward, kind: button, anchor: [344, 207], label: "Boat switch forward" }
+  - { id: boat_back, kind: button, anchor: [344, 233], label: "Boat switch back" }
+  - { id: speedbrake_forward, kind: button, anchor: [344, 165], label: "Speed brake forward" }
+  - { id: speedbrake_back, kind: button, anchor: [344, 191], label: "Speed brake back" }
+  - { id: pinky_forward, kind: button, anchor: [67, 174], label: "Pinky switch forward" }
+  - { id: pinky_back, kind: button, anchor: [67, 224], label: "Pinky switch back" }
+  - { id: left_throttle_button, kind: button, anchor: [125, 104], label: "Left throttle button (LTB)" }
+  - { id: idle_left_off, kind: button, anchor: [125, 293], label: "Left throttle lifted past idle to OFF" }
+  - { id: idle_right_off, kind: button, anchor: [260, 297], label: "Right throttle lifted past idle to OFF" }
+  # The base panel
+  - { id: eac_arm, kind: button, anchor: [466, 420], label: "EAC arm" }
+  - { id: radar_altimeter_normal, kind: button, anchor: [536, 420], label: "Radar altimeter NRM" }
+  - { id: autopilot_engage, kind: button, anchor: [600, 420], label: "Autopilot engage" }
+  - { id: autopilot_path, kind: button, anchor: [660, 408], label: "Autopilot mode PATH (up)" }
+  - { id: autopilot_alt, kind: button, anchor: [660, 432], label: "Autopilot mode ALT (down)" }
+  - { id: flaps_up, kind: button, anchor: [423, 290], label: "Flaps UP" }
+  - { id: flaps_down, kind: button, anchor: [423, 330], label: "Flaps DN" }
+  - { id: fuel_flow_left, kind: button, anchor: [611, 64], label: "Left engine fuel flow NORM" }
+  - { id: fuel_flow_right, kind: button, anchor: [682, 64], label: "Right engine fuel flow NORM" }
+  - { id: engine_left_ignition, kind: button, anchor: [611, 140], label: "Left engine operate IGN (up)" }
+  - { id: engine_left_motor, kind: button, anchor: [611, 164], label: "Left engine operate MOTOR (down)" }
+  - { id: engine_right_ignition, kind: button, anchor: [682, 140], label: "Right engine operate IGN (up)" }
+  - { id: engine_right_motor, kind: button, anchor: [682, 164], label: "Right engine operate MOTOR (down)" }
+  - { id: apu_start, kind: button, anchor: [650, 222], label: "APU start" }
+  - { id: gear_warning_silence, kind: button, anchor: [643, 346], label: "Landing gear warning silence" }

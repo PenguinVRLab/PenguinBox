@@ -10,6 +10,8 @@
 #include "qemu/thread.h"
 #include "vr_xr_loader.h"
 
+#define VR_XR_MAX_LAYERS 8
+
 typedef struct VRXrSession {
     XrInstance instance;
     XrSystemId system_id;
@@ -19,8 +21,18 @@ typedef struct VRXrSession {
     bool session_running;
     bool lost;
     bool cylinder_supported;
+    bool hand_interaction_supported;
+    bool hand_tracking_supported;
+    uint32_t max_layer_count;
+    uint32_t max_swapchain_w;
+    uint32_t max_swapchain_h;
     XrVersion vk_min_version;
     XrVersion vk_max_version;
+    char runtime_name[XR_MAX_RUNTIME_NAME_SIZE];
+    XrVersion runtime_version;
+    char system_name[XR_MAX_SYSTEM_NAME_SIZE];
+    const char *enabled_ext[5];
+    uint32_t enabled_ext_count;
 } VRXrSession;
 
 #define VR_COMP_NUM_CMD_BUFFERS 2
@@ -56,6 +68,7 @@ typedef struct VRCompositor {
     uint32_t swapchain_height;
 
     VkImageCopy *flip_regions;
+    VkImageCopy *flip_regions_l1;
     uint32_t flip_regions_count;
 
     XrSpace view_space;
@@ -97,8 +110,6 @@ typedef struct VRCompositor {
 } VRCompositor;
 
 typedef struct VRCamera {
-    bool hunt_requested;
-    uint32_t hunt_count;
 
     char *yaw_addr_str, *pitch_addr_str, *gate_addr_str;
     uint32_t yaw_addr, pitch_addr, gate_addr;
@@ -151,11 +162,10 @@ bool vr_xr_session_running(void);
 bool vr_compositor_start(PGRAPHState *pg);
 void vr_compositor_stop(void);
 void vr_compositor_frame(PGRAPHState *pg);
+bool vr_compositor_views_at(XrTime t, XrView out[2]);
 
 void vr_camera_frame(PGRAPHState *pg);
-void vr_camera_hunt_poll(PGRAPHState *pg);
 void vr_camera_reset(void);
-void vr_camera_request_hunt_dump(void);
 void vr_camera_shutdown(void);
 
 #endif

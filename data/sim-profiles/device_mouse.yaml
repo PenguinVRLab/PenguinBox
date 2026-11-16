@@ -1,0 +1,28 @@
+# A mouse as a device (work/0020; the owner, 2026-10-09: "mouse was always supposed to be an input device"). Every
+# input carries `code`, its Linux evdev code as evtest prints it: a `relative` input the REL_* code of its EV_REL
+# events (motion, never a position: no min, rest or max), a button the BTN_* code of its EV_KEY events. Each code is
+# cited to /usr/include/linux/input-event-codes.h (the Linux 5.14 UAPI header on the dev box, read 2026-10-09) by
+# name and line; the codes are the kernel's fixed ABI, the line numbers are this header's.
+# Art: devices/art/mouse.svg, an original schematic after the owner's sketch (a right-handed mouse from above).
+# Anchors: the buttons and the wheel on their shapes; moving the mouse on the body's palm arrows.
+# UNSURE, check with press-to-identify on the real mouse: which thumb button is BTN_SIDE and which BTN_EXTRA (most
+# mice report the rear one as BTN_SIDE, "back"); the right-edge button's code differs between models (BTN_FORWARD is a
+# placeholder); some mice report the wheel's press as BTN_MIDDLE, all do here.
+schema: sim-profile/1
+kind: device
+id: mouse
+name: "Mouse"
+source: mouse
+art: devices/art/mouse.svg
+inputs:
+  # Moving it, and the wheel
+  - { id: rel_x, kind: relative, code: 0, anchor: [204, 300], label: "Move left / right" }  # REL_X input-event-codes.h:818
+  - { id: rel_y, kind: relative, code: 1, anchor: [150, 350], label: "Move forward / back" }  # REL_Y input-event-codes.h:819
+  - { id: wheel, kind: relative, code: 8, anchor: [150, 80], label: "Wheel" }  # REL_WHEEL input-event-codes.h:826
+  # The buttons
+  - { id: left, kind: button, code: 272, anchor: [95, 120], label: "Left button" }  # BTN_LEFT input-event-codes.h:356
+  - { id: right, kind: button, code: 273, anchor: [205, 120], label: "Right button" }  # BTN_RIGHT input-event-codes.h:357
+  - { id: middle, kind: button, code: 274, anchor: [150, 140], label: "Wheel press" }  # BTN_MIDDLE input-event-codes.h:358
+  - { id: side_back, kind: button, code: 275, anchor: [29, 243], label: "Thumb button, rear" }  # BTN_SIDE input-event-codes.h:359
+  - { id: side_forward, kind: button, code: 276, anchor: [29, 190], label: "Thumb button, front" }  # BTN_EXTRA input-event-codes.h:360
+  - { id: side_right, kind: button, code: 277, anchor: [271, 218], label: "Right-edge button" }  # BTN_FORWARD input-event-codes.h:361

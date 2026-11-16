@@ -60,11 +60,16 @@ input:
     type: bool
     default: true
   background_input_capture: bool
-  # Pre-flight check before a "sim" title boots (Steel Battalion, Line of
-  # Contact, ...): the controller diagnostics panel opens as a checklist and
-  # the VM stays paused until Continue or Skip.
-  # Off => the title probe never runs at all.
+  # RETIRED 2026-10-27 (owner: the Sim Configuration Tool is replaced
+  # completely by the new implementation). Read by nothing: ui/xemu.c no longer
+  # arms the gate. Kept only so an existing xemu.toml that sets it still loads.
   sim_preflight_gate:
+    type: bool
+    default: false
+  # RETIRED 2026-11-14 (owner: automatic Steel Battalion passthrough removed). Read by nothing; a
+  # plugged-in controller is no longer attached at launch. Kept only so an existing xemu.toml that
+  # sets it still loads. Passthrough is a developer switch only: XEMU_SBC_PASSTHROUGH=1 (owner, "go with c").
+  sbc_passthrough:
     type: bool
     default: true
   keyboard_controller_scancode_map:
@@ -445,15 +450,59 @@ vr:
   headlook_base_validate_equals:
     type: integer
     default: 0
-  hunt_enable:
-    type: bool
-    default: false
+  # The game's pitch limits, in its units (directLook, Halo: +-1.4923 rad):
+  # the written pitch is clamped to them so the game never clamps it itself
+  # (a game-side clamp would be folded into the base as a stick move and the
+  # view would drift). Off while max <= min.
+  headlook_pitch_min:
+    type: float
+    default: 0.0
+  headlook_pitch_max:
+    type: float
+    default: 0.0
+  # The free projection (hw/xbox/nv2a/pgraph/vr_worldproj.c): `projection`
+  # renders the world through the headset's frustum and pose for a title with
+  # a row in vr_worldproj_profiles.c; any other title stays on the screen. A
+  # control file named by XEMU_VR_WORLDPROJ overrides it.
+  view:
+    type: enum
+    values: [screen, projection]
+    default: screen
   # SBC in-headset cockpit panel: a world-locked console readout composited
   # as a second quad layer (vr_sbc_panel.*). Off by default;
   # when off, the compositor does zero panel work (byte-identical off-state).
   sbc_panel_enable:
     type: bool
     default: false
+  # The near-field 3D layer: drawn hands from XR_EXT_hand_tracking (and the
+  # controller twin later) as a projection layer between the screen and the
+  # SBC panel (docs/vr/nearfield-layer-design.md). Off by default; when off,
+  # no swapchain, no layer and no per-frame work beyond one read, so the
+  # submitted frames are byte-identical to a build without it.
+  hands_mode:
+    type: enum
+    values: ['off', tracked]
+    default: 'off'
+  # The near-field layer's render scale: its image is this fraction of the
+  # runtime's recommended per-eye size per axis (clamped to 0.25..1; read when
+  # the layer is created, once per session). The fov is unchanged, so only the
+  # hands' pixel density changes. XEMU_VR_HANDS_SCALE overrides it at start.
+  # Default 1 (the full size) until the instrument and the owner's eyes clear a
+  # lower one; 0.5 is the candidate
+  # (docs/vr/nearfield-efficiency-finding.md).
+  hands_scale:
+    type: float
+    default: 1.0
+  # What the tracked hands are drawn as: capsules from the joints (the
+  # default) or the glTF glove pair skinned on the CPU to the same 26 joints
+  # (hw/xbox/nv2a/pgraph/vk/vr_hands_gltf.c). Read when the near-field layer
+  # is created, once per session; XEMU_VR_HANDS_MODEL=capsules|glove
+  # overrides it at start. A glove file the loader refuses is logged and the
+  # capsules are drawn instead.
+  hands_model:
+    type: enum
+    values: [capsules, glove]
+    default: capsules
   sbc_panel_anchor:
     type: enum
     values: [console, screen, world]
@@ -618,6 +667,18 @@ net:
           type: enum
           values: [tcp, udp]
           default: tcp
+
+sim:
+  # The Sim Configurator (B-SHIP-1, S-55; the owner, 2026-11-14): the games whose plain Boot opens the Sim
+  # Configurator first ("Always open in Sim Configurator" in the Games list's right-click menu), by the XBE
+  # title id read from the disc image (8 upper-case hex digits, e.g. 43430002). Written only by PenguinBox.
+  always_open:
+    type: array
+    items:
+      title_id: string
+  # The Sim Configurator's command line (empty: `sim-configurator` on PATH, else the flatpak
+  # com.penguinvrlabs.simconfigurator). The hand-off's flags are appended. XEMU_SIM_CONFIGURATOR_CMD overrides it.
+  configurator_command: string
 
 sys:
   mem_limit:

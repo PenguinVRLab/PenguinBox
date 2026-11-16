@@ -1,0 +1,25 @@
+# The shipped example BUTTON BOX (decision S-51; the owner, 2026-11-14: "generic DIY box"; "it would be nice to have
+# an example to supply with the device so we can have a picture with pre-sets"). A generic DIY box: six push buttons
+# on an Arduino Leonardo-class board running a keyboard sketch, so it presents as a KEYBOARD (`source: keyboard`) and
+# each button is a `button` with its `scancode`, the Linux evdev key code (input-event-codes.h on the dev box).
+# Keys F14-F19: an Arduino keyboard sketch can send F13-F24 at most (the library's report descriptor stops at usage
+# 0x73), and on a stock GNOME desktop F14-F19 do nothing (OBSERVED 2026-11-14: F13 is XF86Tools = Settings, F20 mic
+# mute, F21-F23 the touchpad, in the xkb `inet` evdev symbols and gsettings media-keys), so the box is harmless when
+# it is not grabbed (decision S-52: PenguinBox takes it exclusively during play). Wire your own box to send the same
+# keys and this profile fits it; any other keys: make your own in Device Studio ("A button box that sends key presses").
+# USB ID: the Leonardo's sketch ID, 2341:8036 (corrections.yaml, cited). Art: devices/art/diy_button_box_6.svg, an
+# original schematic; anchors are the button centres.
+schema: sim-profile/1
+kind: device
+id: diy_button_box_6
+name: "DIY button box (6 buttons)"
+source: keyboard
+match: { vid: 0x2341, pid: 0x8036 }
+art: devices/art/diy_button_box_6.svg
+inputs:
+  - { id: btn_1, kind: button, scancode: 184, anchor: [90, 95], label: "1" }  # KEY_F14 input-event-codes.h:266
+  - { id: btn_2, kind: button, scancode: 185, anchor: [180, 95], label: "2" }  # KEY_F15 input-event-codes.h:267
+  - { id: btn_3, kind: button, scancode: 186, anchor: [270, 95], label: "3" }  # KEY_F16 input-event-codes.h:268
+  - { id: btn_4, kind: button, scancode: 187, anchor: [90, 175], label: "4" }  # KEY_F17 input-event-codes.h:269
+  - { id: btn_5, kind: button, scancode: 188, anchor: [180, 175], label: "5" }  # KEY_F18 input-event-codes.h:270
+  - { id: btn_6, kind: button, scancode: 189, anchor: [270, 175], label: "6" }  # KEY_F19 input-event-codes.h:271

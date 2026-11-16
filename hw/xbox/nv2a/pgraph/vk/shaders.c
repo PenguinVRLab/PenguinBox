@@ -501,14 +501,84 @@ static ShaderBinding *get_shader_binding_for_state(PGRAPHVkState *r,
     return binding;
 }
 
-static void apply_uniform_updates(ShaderUniformLayout *layout,
-                                  const UniformInfo *info, int *locs,
-                                  void *values, size_t count)
+static void apply_uniform_updates_stock(ShaderUniformLayout *layout,
+                                        const UniformInfo *info, int *locs,
+                                        void *values, size_t count)
 {
     for (int i = 0; i < count; i++) {
         if (locs[i] != -1) {
             uniform_copy(layout, locs[i], (char*)values + info[i].val_offs,
                          4, (info[i].size * info[i].count) / 4);
+        }
+    }
+}
+
+static void apply_uniform_updates_bulk(ShaderUniformLayout *layout,
+                                       const UniformInfo *info, int *locs,
+                                       void *values, size_t count)
+{
+    for (int i = 0; i < count; i++) {
+        if (locs[i] != -1) {
+            uniform_copy_bulk(layout, locs[i],
+                              (char *)values + info[i].val_offs, 4,
+                              (info[i].size * info[i].count) / 4);
+        }
+    }
+}
+
+static int uniform_bulk_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *v = getenv("XEMU_UNIFORM_BULK");
+        int m = (v && *v) ? atoi(v) : 0;
+        mode = (m == 1 || m == 2) ? m : 0;
+        if (mode) {
+            fprintf(stderr, "uniform-bulk: XEMU_UNIFORM_BULK=%d (%s)\n", mode,
+                    mode == 2 ? "bulk copy + byte self-check" : "bulk copy");
+        }
+    }
+    return mode;
+}
+
+static void apply_uniform_updates(ShaderUniformLayout *layout,
+                                  const UniformInfo *info, int *locs,
+                                  void *values, size_t count)
+{
+    int mode = uniform_bulk_mode();
+    if (mode == 0) {
+        apply_uniform_updates_stock(layout, info, locs, values, count);
+        return;
+    }
+    if (mode == 1) {
+        apply_uniform_updates_bulk(layout, info, locs, values, count);
+        return;
+    }
+
+    static void *shadow;
+    static size_t shadow_size;
+    if (shadow_size < layout->total_size) {
+        shadow = g_realloc(shadow, layout->total_size);
+        shadow_size = layout->total_size;
+    }
+    void *orig = layout->allocation;
+    memcpy(shadow, orig, layout->total_size);
+    layout->allocation = shadow;
+    apply_uniform_updates_stock(layout, info, locs, values, count);
+    layout->allocation = orig;
+    apply_uniform_updates_bulk(layout, info, locs, values, count);
+    if (memcmp(shadow, orig, layout->total_size)) {
+        static int reported;
+        size_t off = 0;
+        while (off < layout->total_size &&
+               ((char *)shadow)[off] == ((char *)orig)[off]) {
+            off++;
+        }
+        if (reported++ < 8) {
+            fprintf(stderr,
+                    "uniform-bulk: SELF-CHECK MISMATCH at byte %zu of %zu "
+                    "(layout %p)\n",
+                    off, layout->total_size, (void *)layout);
         }
     }
 }
@@ -616,6 +686,29 @@ static void capture_const_skip_state(PGRAPHState *pg, PGRAPHVkState *r)
     memset(pg->ltc1_dirty, 0, sizeof(pg->ltc1_dirty));
 }
 
+static void compute_uniform_values(PGRAPHState *pg, PGRAPHVkState *r, ShaderBinding *binding,
+                                   VshUniformValues *vsh_values, PshUniformValues *psh_values)
+{
+    pgraph_glsl_set_vsh_uniform_values(pg, &binding->state.vsh,
+                                       binding->vsh.uniform_locs, vsh_values);
+    pgraph_glsl_set_psh_uniform_values(pg, binding->psh.uniform_locs,
+                                       psh_values);
+    for (int i = 0; i < 4; i++) {
+        assert(r->texture_bindings[i] != NULL);
+        float scale = r->texture_bindings[i]->key.scale;
+
+        BasicColorFormatInfo f_basic =
+            kelvin_color_format_info_map[r->texture_bindings[i]
+                                             ->key.state.color_format];
+        if (!f_basic.linear) {
+            scale = 1.0;
+        }
+
+        psh_values->texScale[i] = scale;
+    }
+}
+
+
 static void update_shader_uniforms(PGRAPHState *pg)
 {
     NV2A_VK_DGROUP_BEGIN("%s", __func__);
@@ -637,29 +730,11 @@ static void update_shader_uniforms(PGRAPHState *pg)
                                        &binding->psh.module_info->uniforms };
 
     VshUniformValues vsh_values;
-    pgraph_glsl_set_vsh_uniform_values(pg, &binding->state.vsh,
-                                  binding->vsh.uniform_locs, &vsh_values);
+    PshUniformValues psh_values;
+    compute_uniform_values(pg, r, binding, &vsh_values, &psh_values);
     apply_uniform_updates(&binding->vsh.module_info->uniforms, VshUniformInfo,
                           binding->vsh.uniform_locs, &vsh_values,
                           VshUniform__COUNT);
-
-    PshUniformValues psh_values;
-    pgraph_glsl_set_psh_uniform_values(pg, binding->psh.uniform_locs,
-                                       &psh_values);
-    for (int i = 0; i < 4; i++) {
-        assert(r->texture_bindings[i] != NULL);
-        float scale = r->texture_bindings[i]->key.scale;
-
-        BasicColorFormatInfo f_basic =
-            kelvin_color_format_info_map[pg->vk_renderer_state
-                                             ->texture_bindings[i]
-                                             ->key.state.color_format];
-        if (!f_basic.linear) {
-            scale = 1.0;
-        }
-
-        psh_values.texScale[i] = scale;
-    }
     apply_uniform_updates(&binding->psh.module_info->uniforms, PshUniformInfo,
                           binding->psh.uniform_locs, &psh_values,
                           PshUniform__COUNT);

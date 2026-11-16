@@ -47,7 +47,12 @@
 #include "tb-context.h"
 #include "tb-internal.h"
 #include "internal-common.h"
-#include "exec/xemu-guest-profile.h"
+#include "xemu-lookup-inline.h"
+#include "exec/xemu-tblookup.h"
+#ifdef TARGET_I386
+#include "cpu.h"
+#include "xemu-tb-key.h"
+#endif
 
 typedef struct SyncClocks {
     int64_t diff_clk;
@@ -215,37 +220,44 @@ TranslationBlock *inv_tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
     return tb_htable_lookup_common(cpu, s, &tb_ctx.inv_htable, inv_tb_lookup_cmp);
 }
 
-static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
+static inline __attribute__((always_inline)) TranslationBlock *
+tb_lookup_impl(CPUState *cpu, const TCGTBCPUState *s, bool ide)
 {
     TranslationBlock *tb;
     CPUJumpCache *jc;
     uint32_t hash;
 
-    tcg_debug_assert(!(s.cflags & CF_INVALID));
+    tcg_debug_assert(!(s->cflags & CF_INVALID));
 
-    hash = tb_jmp_cache_hash_func(s.pc);
+    hash = tb_jmp_cache_hash_func(s->pc);
     jc = cpu->tb_jmp_cache;
 
     tb = qatomic_read(&jc->array[hash].tb);
     if (likely(tb &&
-               jc->array[hash].pc == s.pc &&
-               tb->cs_base == s.cs_base &&
-               tb->flags == s.flags &&
-               tb_cflags(tb) == s.cflags)) {
+               jc->array[hash].pc == s->pc &&
+               tb->cs_base == s->cs_base &&
+               tb->flags == s->flags &&
+               tb_cflags(tb) == s->cflags)) {
         goto hit;
     }
 
-    tb = tb_htable_lookup(cpu, s);
+    tb = tb_htable_lookup(cpu, *s);
     if (tb == NULL) {
         return NULL;
     }
 
-    jc->array[hash].pc = s.pc;
+    jc->array[hash].pc = s->pc;
     qatomic_set(&jc->array[hash].tb, tb);
 
 hit:
-    assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
+    assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s->pc);
     return tb;
+}
+
+static inline __attribute__((always_inline)) TranslationBlock *
+tb_lookup(CPUState *cpu, const TCGTBCPUState *s)
+{
+    return tb_lookup_impl(cpu, s, true);
 }
 
 static void log_cpu_exec(vaddr pc, CPUState *cpu,
@@ -324,21 +336,58 @@ static inline bool check_for_breakpoints(CPUState *cpu, vaddr pc,
         check_for_breakpoints_slow(cpu, pc, cflags);
 }
 
+static uint32_t __attribute__((noinline)) lookup_bp_cflags(CPUState *cpu, vaddr pc, uint32_t cflags)
+{
+    return check_for_breakpoints_slow(cpu, pc, &cflags) ? (uint32_t)-1 : cflags;
+}
+
+static inline __attribute__((always_inline)) void xemu_tb_cpu_state(CPUState *cpu, TCGTBCPUState *s)
+{
+#ifdef TARGET_I386
+    x86_tb_key(cpu_env(cpu), s);
+#else
+    *s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+#endif
+}
+
+int xemu_tb_fastptr;
+
+static void __attribute__((constructor)) xemu_tblookup_ctor(void)
+{
+    const char *e = getenv("XEMU_TB_FASTPTR");
+    if (e && !strcmp(e, "1")) {
+        xemu_tb_fastptr = 1;
+    } else if (e && *e && strcmp(e, "0")) {
+        fprintf(stderr, "xemu-fastptr: XEMU_TB_FASTPTR=%s not understood; off\n", e);
+    }
+    if (xemu_tb_fastptr) {
+        fprintf(stderr, "xemu-fastptr: XEMU_TB_FASTPTR %s (the inline jump-cache probe at goto_ptr tails)\n",
+                xemu_tb_fastptr == 2 ? "verify" : "on");
+    }
+}
+
+
 const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
 {
     CPUState *cpu = env_cpu(env);
-    TranslationBlock *tb;
 
     cpu->neg.can_do_io = true;
 
-    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
-    s.cflags = curr_cflags(cpu);
 
-    if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
-        cpu_loop_exit(cpu);
+    TCGTBCPUState s;
+    xemu_tb_cpu_state(cpu, &s);
+    s.cflags = curr_cflags_inline(cpu);
+    TranslationBlock *tb;
+
+    if (unlikely(!QTAILQ_EMPTY(&cpu->breakpoints))) {
+        s.cflags = lookup_bp_cflags(cpu, s.pc, s.cflags);
+        if (s.cflags == (uint32_t)-1) {
+            cpu_loop_exit(cpu);
+        }
     }
+    xemu_fastptr_gate_update(cpu, s.cflags);
 
-    tb = tb_lookup(cpu, s);
+    tb = tb_lookup(cpu, &s);
     if (tb == NULL) {
         return tcg_code_gen_epilogue;
     }
@@ -459,13 +508,14 @@ void cpu_exec_step_atomic(CPUState *cpu)
         g_assert(!cpu->running);
         cpu->running = true;
 
-        TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
-        s.cflags = curr_cflags(cpu);
+        TCGTBCPUState s;
+        xemu_tb_cpu_state(cpu, &s);
+        s.cflags = curr_cflags_inline(cpu);
 
         s.cflags &= ~CF_PARALLEL;
         s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR | 1;
 
-        tb = tb_lookup(cpu, s);
+        tb = tb_lookup(cpu, &s);
         if (tb == NULL) {
             mmap_lock();
             tb = tb_gen_code(cpu, s);
@@ -716,11 +766,6 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
-#ifdef XBOX
-    if (unlikely(xemu_gp_enabled)) {
-        xemu_guest_profile_tb((uint32_t)pc);
-    }
-#endif
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
     if (*tb_exit != TB_EXIT_REQUESTED) {
@@ -759,11 +804,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
         while (!cpu_handle_interrupt(cpu, &last_tb)) {
             TranslationBlock *tb;
-            TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+            TCGTBCPUState s;
+            xemu_tb_cpu_state(cpu, &s);
             s.cflags = cpu->cflags_next_tb;
 
-            if (s.cflags == -1) {
-                s.cflags = curr_cflags(cpu);
+            bool fresh_cflags = s.cflags == -1;
+            if (fresh_cflags) {
+                s.cflags = curr_cflags_inline(cpu);
             } else {
                 cpu->cflags_next_tb = -1;
             }
@@ -771,8 +818,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
                 break;
             }
+            if (fresh_cflags) {
+                xemu_fastptr_gate_update(cpu, s.cflags);
+            } else {
+                cpu->xemu_fastptr_gate = 0;
+            }
 
-            tb = tb_lookup(cpu, s);
+            tb = tb_lookup(cpu, &s);
             if (tb == NULL) {
                 CPUJumpCache *jc;
                 uint32_t h;
@@ -792,7 +844,8 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 last_tb = NULL;
             }
 #endif
-            if (last_tb) {
+            if (last_tb
+                ) {
                 tb_add_jump(last_tb, tb_exit, tb);
             }
 

@@ -42,6 +42,33 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
                                       sizes, count, 1);
 }
 
+bool pgraph_vk_vertex_ram_range_uploaded(PGRAPHVkState *r, hwaddr offset,
+                                         VkDeviceSize size)
+{
+    size_t start_bit = offset / TARGET_PAGE_SIZE;
+    size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
+
+    return find_next_bit(r->uploaded_bitmap, end_bit, start_bit) < end_bit;
+}
+
+bool pgraph_vk_vertex_ram_range_stale(PGRAPHVkState *r, hwaddr offset,
+                                      VkDeviceSize size)
+{
+    size_t start_bit = offset / TARGET_PAGE_SIZE;
+    size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
+
+    return find_next_bit(r->mirror_stale_bitmap, end_bit, start_bit) < end_bit;
+}
+
+void pgraph_vk_mark_vertex_ram_range_stale(PGRAPHVkState *r, hwaddr offset,
+                                           VkDeviceSize size)
+{
+    size_t start_bit = offset / TARGET_PAGE_SIZE;
+    size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
+
+    bitmap_set(r->mirror_stale_bitmap, start_bit, end_bit - start_bit);
+}
+
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
                                         void *data, VkDeviceSize size)
 {
@@ -53,8 +80,7 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
     size_t nbits = end_bit - start_bit;
 
-    if (find_next_bit(r->uploaded_bitmap, start_bit + nbits, start_bit) <
-        end_bit) {
+    if (pgraph_vk_vertex_ram_range_uploaded(r, offset, size)) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
     }
 
@@ -64,6 +90,7 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
 
     bitmap_set(r->uploaded_bitmap, start_bit, nbits);
+    bitmap_clear(r->mirror_stale_bitmap, start_bit, nbits);
 }
 
 static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size)
@@ -208,7 +235,7 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
             attrib_data_addr = attr_data + attr->offset - d->vram_ptr;
             stride = attr->stride;
             start = attrib_data_addr + min_element * stride;
-            update_memory_buffer(d, start, num_elements * stride);
+            update_memory_buffer(d, start, ((hwaddr)max_element - min_element + 1) * stride);
         }
 
         uint32_t provoking_element_index = provoking_element - min_element;
@@ -233,8 +260,11 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
         }
 
         NV2A_VK_DPRINTF("offset = %08" HWADDR_PRIx, attrib_data_addr);
-        last_entry += stride * provoking_element_index;
-        pgraph_update_inline_value(attr, last_entry);
+        if (inline_data || start + stride * provoking_element_index + element_size <=
+                               memory_region_size(d->vram)) {
+            last_entry += stride * provoking_element_index;
+            pgraph_update_inline_value(attr, last_entry);
+        }
 
         r->vertex_attribute_to_description_location[i] =
             r->num_active_vertex_binding_descriptions;

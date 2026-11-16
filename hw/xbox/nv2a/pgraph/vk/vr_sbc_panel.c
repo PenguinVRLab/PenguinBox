@@ -5,8 +5,15 @@
 
 #include "qemu/osdep.h"
 #include "qemu/seqlock.h"
+#include "qemu/sockets.h"
 #include "ui/xemu-settings.h"
 #include "ui/xemu-input.h"
+
+static uint8_t s_injected_keys[SDL_SCANCODE_COUNT];
+
+static uint32_t s_glove_sent;
+static uint32_t s_glove_failed;
+static void gloves_report(void);
 #include "vr_sbc_panel.h"
 
 typedef uint8_t Rgba[4];
@@ -302,6 +309,8 @@ static void resolve_label(char dst[LBL_MAX], int scancode)
 
 void vr_sbc_panel_publish(void)
 {
+    gloves_report();
+
     if (!g_config.vr.enable || !g_config.vr.sbc_panel_enable) {
         return;
     }
@@ -341,25 +350,6 @@ void vr_sbc_panel_publish(void)
     s_slot = cand;
     seqlock_write_end(&s_seq);
 
-    const char *dump = getenv("XEMU_VR_PANEL_DUMP");
-    if (dump && cand.active) {
-        static uint8_t scratch[VR_SBC_PANEL_W * VR_SBC_PANEL_H * 4];
-        raster_panel(scratch, &cand);
-        FILE *f = fopen(dump, "wb");
-        if (f) {
-            fprintf(f, "P6\n%d %d\n255\n", VR_SBC_PANEL_W, VR_SBC_PANEL_H);
-            for (size_t i = 0; i < sizeof(scratch); i += 4) {
-                unsigned a = scratch[i + 3];
-                uint8_t px[3] = {
-                    (uint8_t)((scratch[i + 0] * a + 16 * (255 - a)) / 255),
-                    (uint8_t)((scratch[i + 1] * a + 18 * (255 - a)) / 255),
-                    (uint8_t)((scratch[i + 2] * a + 26 * (255 - a)) / 255),
-                };
-                fwrite(px, 1, 3, f);
-            }
-            fclose(f);
-        }
-    }
 }
 
 static void draw_lamp_cell(uint8_t *rgba, int x, int y, const RowItem *it,
@@ -482,6 +472,58 @@ static void raster_panel(uint8_t *rgba, const VrSbcSnapshot *s)
     }
 }
 
+typedef struct VrPanelPointer {
+    int px, py;
+    int cell;
+    bool pressed;
+} VrPanelPointer;
+
+static VrPanelPointer s_pointer[2] = { { -1, -1, -1, false },
+                                       { -1, -1, -1, false } };
+static VrPanelPointer s_pointer_drawn[2];
+
+void vr_sbc_panel_set_pointer(int hand, int px, int py, int cell,
+                              bool pressed)
+{
+    if (hand < 0 || hand > 1) {
+        return;
+    }
+    s_pointer[hand] = (VrPanelPointer){ px, py, cell, pressed };
+}
+
+static void draw_pointer_overlay(uint8_t *rgba)
+{
+    size_t n = 0;
+    const VrSbcPanelCell *cells = vr_sbc_panel_cells(&n);
+
+    for (int h = 0; h < 2; h++) {
+        const VrPanelPointer *pt = &s_pointer[h];
+        if (pt->cell >= 0 && (size_t)pt->cell < n) {
+            const VrSbcPanelCell *cl = &cells[pt->cell];
+            if (pt->pressed) {
+                outline_rect(rgba, cl->x, cl->y, cl->w, cl->h, 3, COL_AMBER);
+            } else {
+                outline_rect(rgba, cl->x, cl->y, cl->w, cl->h, 2, COL_ON);
+            }
+        }
+        if (pt->px >= 0 && pt->py >= 0) {
+            const int ARM = 5;
+            int x0 = pt->px - ARM, x1 = pt->px + ARM;
+            int y0 = pt->py - ARM, y1 = pt->py + ARM;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 >= VR_SBC_PANEL_W) x1 = VR_SBC_PANEL_W - 1;
+            if (y1 >= VR_SBC_PANEL_H) y1 = VR_SBC_PANEL_H - 1;
+            if (pt->py >= 0 && pt->py < VR_SBC_PANEL_H) {
+                fill_rect(rgba, x0, pt->py, x1 - x0 + 1, 1, COL_ON);
+            }
+            if (pt->px >= 0 && pt->px < VR_SBC_PANEL_W) {
+                fill_rect(rgba, pt->px, y0, 1, y1 - y0 + 1, COL_ON);
+            }
+        }
+    }
+}
+
 bool vr_sbc_panel_frame(uint8_t *rgba, bool *active)
 {
     VrSbcSnapshot snap;
@@ -497,11 +539,15 @@ bool vr_sbc_panel_frame(uint8_t *rgba, bool *active)
     if (!snap.active) {
         return false;
     }
-    if (start == s_raster_seq) {
+    const bool ptr_dirty =
+        memcmp(s_pointer, s_pointer_drawn, sizeof(s_pointer)) != 0;
+    if (start == s_raster_seq && !ptr_dirty) {
         return false;
     }
 
     raster_panel(rgba, &snap);
+    draw_pointer_overlay(rgba);
+    memcpy(s_pointer_drawn, s_pointer, sizeof(s_pointer));
     s_raster_seq = start;
     return true;
 }
@@ -570,10 +616,186 @@ const VrSbcPanelCell *vr_sbc_panel_cells(size_t *count)
     return k_cells;
 }
 
+#define GLOVES_PORT   27460
+#define GLOVES_MSG_LEN 8
+
+enum {
+    GLOVE_THUMB = 0, GLOVE_POINTER, GLOVE_MIDDLE, GLOVE_RING, GLOVE_PINKY,
+    GLOVE_WRIST, GLOVE_PALM6, GLOVE_PALM7,
+};
+
+typedef struct GlovePulse {
+    const char *cell_id;
+    uint8_t     actuator;
+    uint16_t    ms;
+} GlovePulse;
+
+static const GlovePulse k_glove_v1[] = {
+    { "hatch",       GLOVE_THUMB,   100 },
+    { "start",       GLOVE_MIDDLE,  100 },
+    { "override",    GLOVE_RING,    100 },
+    { "mag",         GLOVE_POINTER, 100 },
+    { "chaff",       GLOVE_MIDDLE,  100 },
+    { "ext",         GLOVE_RING,    100 },
+    { "main",        GLOVE_POINTER, 100 },
+    { "sub",         GLOVE_MIDDLE,  100 },
+    { "lock",        GLOVE_RING,    100 },
+    { "ignition",    GLOVE_PALM7,   150 },
+    { "eject",       GLOVE_PALM7,   150 },
+    { "toggle.filt", GLOVE_PINKY,   100 },
+    { "toggle.oxy",  GLOVE_PINKY,   100 },
+    { "toggle.fuel", GLOVE_PINKY,   100 },
+    { "toggle.buf",  GLOVE_PINKY,   100 },
+    { "toggle.vt",   GLOVE_PINKY,   100 },
+};
+
+#define GLOVE_V1_HAND      0
+#define GLOVE_V1_INTENSITY 60
+
+static uint8_t s_glove_msg[ARRAY_SIZE(k_cells)][GLOVES_MSG_LEN];
+
+static int s_glove_fd = -1;
+
+static bool s_glove_down_logged;
+
+static void gloves_report_totals(void)
+{
+    fprintf(stderr, "PenguinBox: gloves sent %u failed %u\n",
+            qatomic_read(&s_glove_sent), qatomic_read(&s_glove_failed));
+}
+
+static void gloves_report(void)
+{
+    static int64_t next_us;
+    static uint32_t last_sum = UINT32_MAX;
+
+    if (!s_glove_down_logged && qatomic_read(&s_glove_failed) != 0) {
+        s_glove_down_logged = true;
+        fprintf(stderr, "PenguinBox: gloves socket down\n");
+    }
+    if (qatomic_read(&s_glove_fd) < 0) {
+        return;
+    }
+    const int64_t now = g_get_monotonic_time();
+    if (now < next_us) {
+        return;
+    }
+    next_us = now + 5 * G_USEC_PER_SEC;
+    const uint32_t sum =
+        qatomic_read(&s_glove_sent) + qatomic_read(&s_glove_failed);
+    if (sum == last_sum) {
+        return;
+    }
+    last_sum = sum;
+    gloves_report_totals();
+}
+
+void vr_sbc_panel_gloves_init(void)
+{
+    const char *env = getenv("XEMU_VR_GLOVES");
+    const bool on = env != NULL && strcmp(env, "1") == 0;
+
+    fprintf(stderr, "PenguinBox: gloves %s\n", on ? "on" : "off");
+    if (!on) {
+        return;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(k_cells); i++) {
+        for (size_t j = 0; j < ARRAY_SIZE(k_glove_v1); j++) {
+            if (strcmp(k_cells[i].id, k_glove_v1[j].cell_id) != 0) {
+                continue;
+            }
+            uint8_t *m = s_glove_msg[i];
+            m[0] = 1;
+            m[1] = GLOVE_V1_HAND;
+            m[2] = k_glove_v1[j].actuator;
+            m[3] = GLOVE_V1_INTENSITY;
+            m[4] = k_glove_v1[j].ms & 0xFF;
+            m[5] = k_glove_v1[j].ms >> 8;
+            break;
+        }
+    }
+
+#ifdef _WIN32
+    fprintf(stderr, "PenguinBox: gloves: no Windows connector in this "
+                    "build; staying off\n");
+#else
+    int fd = qemu_socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        fprintf(stderr, "PenguinBox: gloves socket down\n");
+        return;
+    }
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(GLOVES_PORT),
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+    };
+    if (!qemu_set_blocking(fd, false, NULL) ||
+        connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        fprintf(stderr, "PenguinBox: gloves socket down\n");
+        return;
+    }
+    qatomic_set(&s_glove_fd, fd);
+    atexit(gloves_report_totals);
+#endif
+}
+
+static void gloves_press(size_t cell)
+{
+#ifndef _WIN32
+    const int fd = qatomic_read(&s_glove_fd);
+    if (fd < 0 || s_glove_msg[cell][0] == 0) {
+        return;
+    }
+    if (send(fd, s_glove_msg[cell], GLOVES_MSG_LEN, MSG_DONTWAIT) ==
+        GLOVES_MSG_LEN) {
+        qatomic_inc(&s_glove_sent);
+    } else {
+        qatomic_inc(&s_glove_failed);
+    }
+#endif
+}
+
 void vr_sbc_panel_inject(const char *cell_id, bool pressed)
 {
-    fprintf(stderr,
-            "xemu-vr: [sbc-panel WIP] inject cell='%s' pressed=%d — no-op "
-            "(input wiring is future scope)\n",
-            cell_id != NULL ? cell_id : "(null)", pressed);
+    if (cell_id == NULL) {
+        return;
+    }
+
+    size_t n = 0;
+    const VrSbcPanelCell *cells = vr_sbc_panel_cells(&n);
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(cells[i].id, cell_id) != 0) {
+            continue;
+        }
+        if (pressed) {
+            gloves_press(i);
+        }
+        if (cells[i].scancode == NULL || cells[i].button_mask == 0) {
+            fprintf(stderr, "PenguinBox: sbc-panel: cell '%s' is not "
+                            "key-injectable (axis/mouse cell)\n", cell_id);
+            return;
+        }
+        int sc = *cells[i].scancode;
+        if (sc <= 0 || sc >= SDL_SCANCODE_COUNT) {
+            fprintf(stderr, "PenguinBox: sbc-panel: cell '%s' has no key "
+                            "binding to inject\n", cell_id);
+            return;
+        }
+        qatomic_set(&s_injected_keys[sc], pressed ? 1 : 0);
+        fprintf(stderr, "PenguinBox: sbc-panel: inject '%s' %s (scancode %d)\n",
+                cell_id, pressed ? "DOWN" : "UP", sc);
+        return;
+    }
+    fprintf(stderr, "PenguinBox: sbc-panel: inject unknown cell '%s'\n",
+            cell_id);
+}
+
+bool vr_sbc_panel_key_injected(int scancode)
+{
+    if (scancode <= 0 || scancode >= SDL_SCANCODE_COUNT) {
+        return false;
+    }
+    return qatomic_read(&s_injected_keys[scancode]) != 0;
 }

@@ -239,6 +239,7 @@ typedef struct PGRAPHState {
     bool waiting_for_context_switch;
 
     bool report_marker_pending;
+    unsigned int query_eager_draws;
     bool force_report_drain;
 
     bool flush_pending;
@@ -305,6 +306,21 @@ static inline void pgraph_reg_w(PGRAPHState *pg, unsigned int r, uint32_t v)
         bitmap_set(pg->regs_dirty, r / sizeof(uint32_t), 1);
     }
     pg->regs_[r] = v;
+}
+
+static inline void pgraph_texture_dirty(PGRAPHState *pg, int slot, bool changed)
+{
+    pg->texture_dirty[slot] = true;
+}
+
+
+static inline void pgraph_vsh_constant_dirty(PGRAPHState *pg, unsigned int row)
+{
+    pg->vsh_constants_dirty[row] = true;
+}
+
+static inline void pgraph_vsh_constants_forget(PGRAPHState *pg)
+{
 }
 
 static inline void pgraph_reg_w_atomic(PGRAPHState *pg, unsigned int r,

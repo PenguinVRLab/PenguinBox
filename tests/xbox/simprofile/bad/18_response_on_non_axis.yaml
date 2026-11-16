@@ -1,0 +1,22 @@
+# BAD fixture (work/0039): bindings_wheel.yaml with one change: a response on a button. Load the good set with this file IN PLACE OF
+# bindings_wheel.yaml; it must be refused with RESPONSE_ON_NON_AXIS.
+schema: sim-profile/1
+kind: bindings
+id: pgr2_wheel
+device: wheel
+target: xbox_duke
+bind:
+- source: steering
+  target: left_stick_x
+- source: paddle_up
+  target: a
+  response:
+    mode: window
+    window:
+    - 0.1
+    - 0.9
+- source: paddle_down
+  target: b
+- source: pov
+  target: dpad_up
+  direction: up

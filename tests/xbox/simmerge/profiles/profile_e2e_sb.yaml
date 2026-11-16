@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simmerge: the merge layer's end-to-end fixture (written for XB-6, not the app's).
+schema: sim-profile/1
+kind: profile
+id: e2e_sb
+name: "merge layer end-to-end"
+target: steel_battalion
+game: { title_id: 0x4d530064, name: "synthetic merge fixture" }
+bindings:
+  e2e_pad: e2e_pad_sb
+  e2e_mouse: e2e_mouse_sb

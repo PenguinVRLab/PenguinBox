@@ -31,6 +31,11 @@
 #include "xemu-hud.h"
 #include "IconsFontAwesome6.h"
 #include "../xemu-snapshots.h"
+#include "../xemu-disc-xbe.h"
+#include "../xemu-settings.h"
+#include "../xemu-sim-handoff.h"
+#include "../xemu-sim-boot.h"
+#include "../xemu-sbc-device.h"
 #include "main-menu.hh"
 
 PopupMenuItemDelegate::~PopupMenuItemDelegate() {}
@@ -340,9 +345,267 @@ public:
     }
 };
 
+struct SimBoot {
+    bool waiting = false, stopped_vm = false, released_sbc = false, ask = false;
+    std::string label, path, why;
+    uint32_t title_id = 0;
+    SimHandoffOutcome asked = SIM_HANDOFF_CRASH;
+};
+static SimBoot g_sim_boot;
+
+static void SimBootRestore(bool boot)
+{
+    SimBoot &b = g_sim_boot;
+    if (b.released_sbc) {
+        sbc_device_init();
+    }
+    if (boot) {
+        ActionLoadDiscFile(b.path.c_str());
+    }
+    if (b.stopped_vm && !runstate_is_running()) {
+        vm_start();
+    }
+    b = SimBoot();
+}
+
+static bool SimBootBegin(const std::string &label, const std::string &path, uint32_t title_id, const char *name)
+{
+    SimBoot &b = g_sim_boot;
+    if (b.waiting || b.ask) {
+        xemu_queue_notification("A Sim Configurator boot is already in progress");
+        return false;
+    }
+    b = SimBoot();
+    b.label = label;
+    b.path = path;
+    b.title_id = title_id;
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_PAUSED);
+        b.stopped_vm = true;
+    }
+    if (sbc_device_host_reader_armed()) {
+        sbc_device_shutdown();
+        b.released_sbc = true;
+    }
+    SimHandoffResult r;
+    if (!xemu_sim_handoff_start(title_id, name && *name ? name : label.c_str(), g_config.sim.configurator_command, &r)) {
+        std::string msg = "Sim Configurator: " + std::string(r.why);
+        xemu_queue_notification(msg.c_str());
+        SimBootRestore(false);
+        return false;
+    }
+    b.waiting = true;
+    return true;
+}
+
+void SimBootDraw(void)
+{
+    SimBoot &b = g_sim_boot;
+    if (!b.waiting && !b.ask) {
+        return;
+    }
+    if (b.waiting) {
+        SimHandoffResult r;
+        if (xemu_sim_handoff_poll(&r)) {
+            b.waiting = false;
+            switch (r.outcome) {
+            case SIM_HANDOFF_SAVED:
+            case SIM_HANDOFF_UNCHANGED: {
+                std::string msg = b.label + ": " + r.why + " (the profile is not applied yet: booting as usual)";
+                xemu_queue_notification(msg.c_str());
+                SimBootRestore(true);
+                return;
+            }
+            case SIM_HANDOFF_CANCEL_BOOT:
+                xemu_queue_notification("Boot cancelled in the Sim Configurator");
+                SimBootRestore(false);
+                return;
+            case SIM_HANDOFF_CRASH:
+            case SIM_HANDOFF_BUSY:
+                b.ask = true;
+                b.asked = r.outcome;
+                b.why = r.why;
+                break;
+            default: {
+                std::string msg = "Sim Configurator: " + std::string(r.why);
+                xemu_queue_notification(msg.c_str());
+                SimBootRestore(false);
+                return;
+            }
+            }
+        }
+    }
+
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), ImGuiCond_Always, ImVec2(0.5, 0.5));
+    ImGui::SetNextWindowSize(ImVec2(460 * g_viewport_mgr.m_scale, 0), ImGuiCond_Always);
+    ImGui::Begin("Sim Configurator###SimBoot", NULL, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PushTextWrapPos(0);
+    if (b.waiting) {
+        ImGui::Text("The Sim Configurator is open for %s.", b.label.c_str());
+        ImGui::TextDisabled("Set up the controllers there; PenguinBox boots the game when it closes.");
+        ImGui::Spacing();
+        ImGui::Button("Cancel");
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+            xemu_sim_handoff_cancel();
+        }
+    } else {
+        if (b.asked == SIM_HANDOFF_BUSY) {
+            ImGui::Text("The Sim Configurator is already open.");
+            ImGui::TextDisabled("Close the Sim Configurator window first, then boot %s again.", b.label.c_str());
+            ImGui::Spacing();
+            if (ImGui::Button("Boot again")) {
+                SimBoot keep = b;
+                SimBootRestore(false);
+                SimBootBegin(keep.label, keep.path, keep.title_id, keep.label.c_str());
+            } else {
+                ImGui::SameLine();
+                if (ImGui::Button("OK")) {
+                    SimBootRestore(false);
+                }
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("The Sim Configurator closed unexpectedly.");
+        ImGui::TextDisabled("%s", b.why.c_str());
+        ImGui::Spacing();
+        if (ImGui::Button("Open it again")) {
+            SimBoot keep = b;
+            SimBootRestore(false);
+            SimBootBegin(keep.label, keep.path, keep.title_id, keep.label.c_str());
+        } else {
+            ImGui::SameLine();
+            if (ImGui::Button("Boot anyway")) {
+                SimBootRestore(true);
+            } else {
+                ImGui::SameLine();
+                if (ImGui::Button("Don't boot")) {
+                    SimBootRestore(false);
+                }
+            }
+        }
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+}
+
+static void GameBoot(const std::string &label, const std::string &path)
+{
+    XemuDiscXbeInfo info;
+    char err[160], tid[9];
+    if (xemu_disc_read_xbe_info(path.c_str(), &info, err, sizeof(err)) == 0) {
+        xemu_disc_title_id_str(info.title_id, tid);
+        if (xemu_settings_sim_always_open(tid)) {
+            if (!xemu_sim_boot_live()) {
+                char *msg = xemu_sim_boot_refusal(label.c_str());
+                xemu_queue_notification(msg);
+                g_free(msg);
+                return;
+            }
+            if (!SimBootBegin(label, path, info.title_id, info.title_name)) {
+                ActionLoadDiscFile(path.c_str());
+            }
+            return;
+        }
+    }
+    ActionLoadDiscFile(path.c_str());
+}
+
+static void MenuNote(const std::string &text)
+{
+    ImGui::PushFont(g_font_mgr.m_menu_font);
+    ImGuiStyle &style = ImGui::GetStyle();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + style.FramePadding.x * 3);
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - style.FramePadding.x);
+    ImGui::TextDisabled("%s", text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+}
+
+class GameOptionsPopupMenu : public virtual PopupMenu {
+protected:
+    std::string m_label, m_path, m_why, m_app_why, m_name;
+    char m_title_id[9] = "";
+    uint32_t m_tid = 0;
+    bool m_have_title = false, m_have_app = false;
+
+public:
+    void SetGame(const std::string &label, const std::string &path)
+    {
+        m_label = label;
+        m_path = path;
+        XemuDiscXbeInfo info;
+        char err[160];
+        m_have_title = xemu_disc_read_xbe_info(path.c_str(), &info, err, sizeof(err)) == 0;
+        if (m_have_title) {
+            xemu_disc_title_id_str(info.title_id, m_title_id);
+            m_tid = info.title_id;
+            m_name = info.title_name;
+        } else {
+            m_title_id[0] = '\0';
+            m_why = err;
+        }
+        char why[256] = "";
+        char **cmd = xemu_sim_handoff_command(g_config.sim.configurator_command, why, sizeof(why));
+        m_have_app = cmd != nullptr;
+        m_app_why = why;
+        xemu_sim_handoff_strv_free(cmd);
+    }
+
+    bool DrawItems(PopupMenuItemDelegate &nav) override
+    {
+        bool pop = false;
+
+        if (m_focus && !m_pop_focus) {
+            ImGui::SetKeyboardFocusHere();
+        }
+
+        MenuNote(m_label);
+        if (PopupMenuButton("Boot", ICON_FA_COMPACT_DISC)) {
+            GameBoot(m_label, m_path);
+            nav.ClearMenuStack();
+            pop = true;
+        }
+
+        bool live = xemu_sim_boot_live();
+        ImGui::BeginDisabled(!live || !m_have_title || !m_have_app);
+        if (PopupMenuButton("Boot once in Sim Configurator", ICON_FA_SLIDERS) && live && m_have_title && m_have_app) {
+            SimBootBegin(m_label, m_path, m_tid, m_name.c_str());
+            nav.ClearMenuStack();
+            pop = true;
+        }
+        ImGui::EndDisabled();
+        if (!live) {
+            MenuNote("not available yet: PenguinBox cannot apply a Sim Configurator setup (the merge layer is not "
+                     "built); a game with \"Always open in Sim Configurator\" set is not booted until it can");
+        } else if (m_have_title && !m_have_app) {
+            MenuNote(m_app_why);
+        }
+
+        bool on = m_have_title && xemu_settings_sim_always_open(m_title_id);
+        ImGui::BeginDisabled(!m_have_title);
+        if (PopupMenuToggle("Always open in Sim Configurator", ICON_FA_SLIDERS, &on) && m_have_title) {
+            xemu_settings_set_sim_always_open(m_title_id, on);
+        }
+        ImGui::EndDisabled();
+        if (!m_have_title) {
+            MenuNote("no title id on this image: " + m_why);
+        }
+
+        if (m_pop_focus) {
+            nav.PopFocus();
+        }
+        return pop;
+    }
+};
+
 class GamesPopupMenu : public virtual PopupMenu {
 protected:
     std::multimap<std::string, std::string> sorted_file_names;
+    GameOptionsPopupMenu options;
 
 public:
     void Show(const ImVec2 &direction) override
@@ -361,9 +624,17 @@ public:
 
         for (const auto &[label, file_path] : sorted_file_names) {
             if (PopupMenuButton(label, ICON_FA_COMPACT_DISC)) {
-                ActionLoadDiscFile(file_path.c_str());
+                GameBoot(label, file_path);
                 nav.ClearMenuStack();
                 pop = true;
+                break;
+            }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right) ||
+                (ImGui::IsItemHovered() && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft))) {
+                options.SetGame(label, file_path);
+                nav.PushFocus();
+                nav.PushMenu(options);
+                break;
             }
         }
 

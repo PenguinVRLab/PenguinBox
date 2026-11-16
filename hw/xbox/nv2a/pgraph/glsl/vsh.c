@@ -21,6 +21,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
+#include "hw/xbox/nv2a/pgraph/vr_worldproj.h"
 #include "vsh.h"
 #include "vsh-ff.h"
 #include "vsh-prog.h"
@@ -445,6 +446,16 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
     return output;
 }
 
+static bool vsh_program_uses_arl(const ProgrammableVshState *prog)
+{
+    for (int i = 0; i < prog->program_length; i++) {
+        if (vsh_get_field(prog->program_data[i], FLD_MAC) == MAC_ARL) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void pgraph_glsl_set_vsh_uniform_values(PGRAPHState *pg, const VshState *state,
                                         const VshUniformLocs locs,
                                         VshUniformValues *values)
@@ -453,6 +464,12 @@ void pgraph_glsl_set_vsh_uniform_values(PGRAPHState *pg, const VshState *state,
         QEMU_BUILD_BUG_MSG(sizeof(values->c) != sizeof(pg->vsh_constants),
                            "Uniform value size inconsistency");
         memcpy(values->c, pg->vsh_constants, sizeof(pg->vsh_constants));
+        if (vr_worldproj_active()) {
+            vr_worldproj_draw_relative(
+                !state->is_fixed_function &&
+                vsh_program_uses_arl(&state->programmable));
+        }
+        vr_worldproj_apply(state->is_fixed_function, values->c);
     }
 
     if (locs[VshUniform_clipRange] != -1) {

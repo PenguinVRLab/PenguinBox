@@ -1,0 +1,7 @@
+schema: sim-profile/1
+kind: calibration
+id: pedals_unit_a
+device: racing_pedals
+port_path: pci-0000:00:14.0-usb-0:3:1.0
+inputs:
+  accel: { min: -32768, rest: -32700, max: 32100 }

@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 #ifndef HW_NV2A_RENDERER_STATUS_H
 #define HW_NV2A_RENDERER_STATUS_H
 

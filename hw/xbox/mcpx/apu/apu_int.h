@@ -83,6 +83,7 @@ typedef struct MCPXAPUState {
 
     MemoryRegion *ram;
     uint8_t *ram_ptr;
+    uint64_t ram_window;
     MemoryRegion mmio;
 
     MCPXAPUVPState vp;
@@ -130,5 +131,7 @@ void mcpx_debug_end_frame(void);
 void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp);
 void mcpx_apu_monitor_finalize(MCPXAPUState *d);
 void mcpx_apu_monitor_frame(MCPXAPUState *d);
+
+#include "apu_ram.h"
 
 #endif

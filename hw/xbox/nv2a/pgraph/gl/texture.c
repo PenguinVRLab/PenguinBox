@@ -27,6 +27,16 @@
 #include "debug.h"
 #include "renderer.h"
 
+static uint32_t gl_max_anisotropy_cap(void)
+{
+    static int64_t cap = -1;
+    if (cap < 0) {
+        const char *v = g_getenv("XEMU_GL_MAX_ANISOTROPY");
+        cap = v ? MAX(g_ascii_strtoll(v, NULL, 10), 1) : UINT32_MAX;
+    }
+    return (uint32_t)cap;
+}
+
 static TextureBinding* generate_texture(const TextureShape s, const uint8_t *texture_data, const uint8_t *palette_data);
 static void texture_binding_destroy(gpointer data);
 
@@ -181,7 +191,7 @@ static void apply_texture_parameters(PGRAPHGLState *r,
 
     if (r->supported_extensions.texture_filter_anisotropic) {
         glTexParameterf(binding->gl_target, GL_TEXTURE_MAX_ANISOTROPY_EXT,
-                        max_anisotropy);
+                        MIN(max_anisotropy, gl_max_anisotropy_cap()));
     }
 
     if (!is_bordered && needs_border_color) {

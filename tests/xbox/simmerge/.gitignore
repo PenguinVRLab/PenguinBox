@@ -1,0 +1,5 @@
+*.o
+simmerge-test
+drill-trunc
+drill-trunc.log
+keys-check

@@ -13,6 +13,8 @@
 namespace
 {
 
+bool g_overlay_hovered = false;
+
 struct SbcControl {
     const char *label;
     int *scancode;
@@ -197,6 +199,11 @@ bool SbcOverlayAvailable(void)
     return xemu_input_keyboard_feeds_sbc();
 }
 
+extern "C" bool xemu_sbc_overlay_wants_mouse(void)
+{
+    return g_overlay_hovered;
+}
+
 void SbcOverlayProcessHotkey(void)
 {
     static bool was_down = false;
@@ -238,6 +245,7 @@ void SbcOverlayProcessHotkey(void)
 
 void SbcOverlayDraw(void)
 {
+    g_overlay_hovered = false;
     if (!g_config.display.ui.sbc_overlay.enable) {
         return;
     }
@@ -268,8 +276,7 @@ void SbcOverlayDraw(void)
     const ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-        ImGuiWindowFlags_NoInputs;
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
 
     if (ImGui::Begin("SBC Cockpit", NULL, flags)) {
         const char *gear = GearGlyph(sbc.gearLever);
@@ -311,15 +318,20 @@ void SbcOverlayDraw(void)
         AxisMeter("ROT", sbc.axis[SBC_AXIS_ROTATION_LEVER]);
 
         ImGui::Separator();
-        if (g_config.display.ui.sbc_overlay.show_all_controls) {
-            ImGui::TextColored(kDim, "ALL CONTROLS");
+        char all_label[48];
+        snprintf(all_label, sizeof(all_label), "ALL CONTROLS  (+%zu)###allctl",
+                 std::size(g_rest) + std::size(g_axis_keys));
+        ImGui::SetNextItemOpen(g_config.display.ui.sbc_overlay.show_all_controls,
+                               ImGuiCond_Always);
+        const bool all_open = ImGui::CollapsingHeader(all_label);
+        g_config.display.ui.sbc_overlay.show_all_controls = all_open;
+        if (all_open) {
             ButtonRow(g_rest, std::size(g_rest), sbc.buttons, 3);
             ImGui::Separator();
             ButtonRow(g_axis_keys, std::size(g_axis_keys), 0, 3);
-        } else {
-            ImGui::TextColored(kDim, "+%zu more \xe2\x80\x94 View menu",
-                               std::size(g_rest) + std::size(g_axis_keys));
         }
+
+        g_overlay_hovered = ImGui::IsWindowHovered();
     }
     ImGui::End();
 }

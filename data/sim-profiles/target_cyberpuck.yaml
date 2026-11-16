@@ -1,0 +1,23 @@
+# Emulated target: the Forte VFX1 CyberPuck, a hand-held tilt pad with three buttons (decisions S-39; the owner,
+# 2026-10-10: "the cyberpuck is an emulated target device for us to use here"). A PC-lane target (`core: pc`, S-37):
+# PenguinVFX's DOSBox-X and 86Box forks drive their emulated VFX1 card with it, through
+# `pvfx_vip_set_puck(card, roll, pitch, buttons)` (PenguinVFX runtime/include/penguinvfx/pvfx_vip.h:128-131: "roll and
+# pitch in the puck's raw units, -255..255 ... and its buttons word"; doc 01:532, "±255 raw").
+# Signs, OBSERVED in Windows 95's "Test CyberPuck" (PenguinVFX docs/cyberpuck/06-verification.md:84): roll + moves the
+# cross right, pitch + moves it down. Buttons: Forte's top, middle and bottom buttons are 1, 2 and 3, bits 1, 2 and 4 of
+# the buttons word (docs/cyberpuck/08-player-guide.md; 02-card-and-bus.md:84, "buttons 1/2/4 light lamps 1/2/3").
+# No emulator reads this file yet (O-28; the PC lane's plan is penguinvfx-*/SIM-CONFIGURATOR.md).
+# Art: devices/art/cyberpuck.svg, an ORIGINAL schematic drawn from the owner's photos of the real puck (2026-10-11; the
+# photos are not in the repo): round, the three buttons on its left edge, the wave-shaped thumb ridge, the cord below; roll and pitch are arrows wrapped round their axes.
+schema: sim-profile/1
+kind: target
+id: cyberpuck
+name: "VFX1 CyberPuck"
+art: devices/art/cyberpuck.svg
+core: pc
+controls:
+  - { id: roll,  kind: axis, min: -255, rest: 0, max: 255, anchor: [300, 395] }
+  - { id: pitch, kind: axis, min: -255, rest: 0, max: 255, anchor: [548, 185] }
+  - { id: button_1, kind: button, anchor: [189, 108] }
+  - { id: button_2, kind: button, anchor: [165, 185] }
+  - { id: button_3, kind: button, anchor: [189, 262] }

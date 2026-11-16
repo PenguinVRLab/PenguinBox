@@ -1,0 +1,13 @@
+# BAD fixture (work/0039): template_joystick_v1.yaml with one change: mirror is text. Load the good set with this file IN PLACE OF
+# template_joystick_v1.yaml; it must be refused with MIRROR_TYPE.
+schema: sim-profile/1
+kind: template
+id: joystick_v1
+mirror: 'no'
+slots:
+- id: r1
+  side: right
+- id: r2
+  side: right
+- id: l1
+  side: left

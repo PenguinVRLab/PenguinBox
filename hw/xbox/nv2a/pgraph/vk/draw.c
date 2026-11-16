@@ -19,7 +19,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
-#include "hw/xbox/nv2a/pgraph/phase_timers.h"
 #include "renderer.h"
 #include <math.h>
 
@@ -49,6 +48,33 @@ bool pgraph_vk_frame_overlap_enabled(void)
         fprintf(stderr,
                 "frame-overlap: S1 overlap-ready per-slot resource recycling %s\n",
                 enabled ? "ON" : "OFF");
+        fprintf(stderr, "frame-overlap-desc: in-place per-slot descriptor reuse %s\n",
+                pgraph_vk_overlap_desc_reuse() ? "ON" : "OFF");
+    }
+    return enabled;
+}
+
+bool pgraph_vk_overlap_desc_reuse(void)
+{
+    static int reuse = -1;
+    if (reuse < 0) {
+        const char *v = getenv("XEMU_FRAME_OVERLAP");
+        reuse = (v && !strcmp(v, "2") && getenv("XEMU_NO_FRAME_OVERLAP") == NULL) ? 1 : 0;
+    }
+    return reuse;
+}
+
+bool pgraph_vk_vtx_war_fix_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = (getenv("XEMU_VTX_WAR_FIX") != NULL &&
+                   getenv("XEMU_NO_VTX_WAR_FIX") == NULL)
+                      ? 1
+                      : 0;
+        fprintf(stderr,
+                "vtx-war-fix: vertex-RAM write-after-read drain removal %s\n",
+                enabled ? "ON" : "OFF");
     }
     return enabled;
 }
@@ -66,6 +92,10 @@ static void overlap_process_slot_retire(PGRAPHState *pg,
         }
         slot->ov_num_pending_fb = 0;
         did_work = true;
+    }
+
+    if (slot->ov_desc_dirty && pgraph_vk_overlap_desc_reuse()) {
+        slot->ov_desc_dirty = false;
     }
 
     if (slot->ov_desc_dirty) {
@@ -359,6 +389,7 @@ static void init_render_pass_state(PGRAPHState *pg, RenderPassState *state)
         r->color_binding && r->color_binding->feedback_mode;
     state->zeta_general =
         r->zeta_binding && r->zeta_binding->feedback_mode;
+    state->view_mask = pgraph_vk_stereo_view_mask(r);
 }
 
 static VkRenderPass create_render_pass(PGRAPHVkState *r, RenderPassState *state)
@@ -460,6 +491,17 @@ static VkRenderPass create_render_pass(PGRAPHVkState *r, RenderPassState *state)
         .dependencyCount = 1,
         .pDependencies = &dependency,
     };
+    uint32_t view_mask = state->view_mask;
+    VkRenderPassMultiviewCreateInfo multiview_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO,
+        .subpassCount = 1,
+        .pViewMasks = &view_mask,
+        .correlationMaskCount = 1,
+        .pCorrelationMasks = &view_mask,
+    };
+    if (view_mask) {
+        renderpass_create_info.pNext = &multiview_info;
+    }
     VkRenderPass render_pass;
     VK_CHECK(vkCreateRenderPass(r->device, &renderpass_create_info, NULL,
                                 &render_pass));
@@ -501,11 +543,18 @@ static void create_frame_buffer(PGRAPHState *pg)
     VkImageView attachments[2];
     int attachment_count = 0;
 
+    uint8_t view_mask = pgraph_vk_stereo_view_mask(r);
+    r->framebuffer_view_mask = view_mask;
+
     if (r->color_binding) {
-        attachments[attachment_count++] = r->color_binding->image_view;
+        attachments[attachment_count++] =
+            view_mask ? r->color_binding->image_view_layers :
+                        r->color_binding->image_view;
     }
     if (r->zeta_binding) {
-        attachments[attachment_count++] = r->zeta_binding->image_view;
+        attachments[attachment_count++] =
+            view_mask ? r->zeta_binding->image_view_layers :
+                        r->zeta_binding->image_view;
     }
 
     SurfaceBinding *binding = r->color_binding ? : r->zeta_binding;
@@ -814,9 +863,7 @@ static void create_pipeline(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     pgraph_vk_bind_textures(d);
-    NV2A_PHASE_MSUB(PF_MSUB_CONST);
     pgraph_vk_bind_shaders(pg);
-    NV2A_PHASE_MSUB(PF_MSUB_PIPE);
 
     bool pipeline_dirty = check_pipeline_dirty(pg);
 
@@ -1150,6 +1197,7 @@ static void bind_descriptor_sets(PGRAPHState *pg)
         &r->current_slot->ov_desc_sets[r->descriptor_set_index - 1] :
         &r->descriptor_sets[r->descriptor_set_index - 1];
 
+    pgraph_vk_stamp_bound_textures(r);
     vkCmdBindDescriptorSets(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             r->pipeline_binding->layout, 0, 1,
                             set, 0,
@@ -1167,8 +1215,14 @@ static void begin_query(PGRAPHVkState *r)
     }
     assert(!r->query_in_flight);
 
+    unsigned int slots = 1;
+    bool pair = false;
+    if (r->query_slot_views && r->render_pass_views > 1) {
+        pair = true;
+        slots = pair ? r->render_pass_views : 1;
+    }
     assert(r->query_epoch_base + (uint32_t)r->num_queries_in_flight -
-               r->query_region_origin <
+               r->query_region_origin + slots <=
            r->query_region_size);
 
     uint32_t idx = r->query_epoch_base + (uint32_t)r->num_queries_in_flight;
@@ -1176,29 +1230,38 @@ static void begin_query(PGRAPHVkState *r)
     if (r->async_queries_enabled || r->query_ring_enabled ||
         r->frame_overlap ||
         r->async_reports_enabled || r->batch_qreset_enabled) {
-        uint32_t owner = r->query_index_submit[idx];
-        if (owner != SURFACE_NO_WRITE) {
-            struct CbFenceSlot *os =
-                &r->cb_fence_ring[owner % CB_FENCE_RING_SIZE];
-            if (os->submit_index == owner &&
-                vkGetFenceStatus(r->device, os->fence) != VK_SUCCESS) {
-                nv2a_profile_inc_counter(NV2A_PROF_QUERY_REUSE_WAIT);
+        for (unsigned int k = 0; k < slots; k++) {
+            uint32_t owner = r->query_index_submit[idx + k];
+            if (owner != SURFACE_NO_WRITE) {
+                struct CbFenceSlot *os =
+                    &r->cb_fence_ring[owner % CB_FENCE_RING_SIZE];
+                if (os->submit_index == owner &&
+                    vkGetFenceStatus(r->device, os->fence) != VK_SUCCESS) {
+                    nv2a_profile_inc_counter(NV2A_PROF_QUERY_REUSE_WAIT);
+                }
+                pgraph_vk_wait_for_submission(r, owner);
             }
-            pgraph_vk_wait_for_submission(r, owner);
+            r->query_index_submit[idx + k] = r->submit_count;
         }
-        r->query_index_submit[idx] = r->submit_count;
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_QUERY);
     if (!r->batch_qreset_enabled) {
-        vkCmdResetQueryPool(r->command_buffer, r->query_pool, idx, 1);
+        vkCmdResetQueryPool(r->command_buffer, r->query_pool, idx, slots);
     }
     vkCmdBeginQuery(r->command_buffer, r->query_pool, idx,
                     VK_QUERY_CONTROL_PRECISE_BIT);
+    if (r->query_slot_views) {
+        r->query_slot_views[idx] = slots > 1 ? 2 : 1;
+        for (unsigned int k = 1; k < slots; k++) {
+            r->query_slot_views[idx + k] = 0;
+        }
+    }
 
     r->query_in_flight = true;
     r->new_query_needed = false;
-    r->num_queries_in_flight++;
+    r->num_queries_in_flight += slots;
+    r->query_open_slots = slots;
 }
 
 static void end_query(PGRAPHVkState *r)
@@ -1212,7 +1275,8 @@ static void end_query(PGRAPHVkState *r)
     assert(r->query_in_flight);
 
     vkCmdEndQuery(r->command_buffer, r->query_pool,
-                  r->query_epoch_base + (uint32_t)r->num_queries_in_flight - 1);
+                  r->query_epoch_base + (uint32_t)r->num_queries_in_flight -
+                      r->query_open_slots);
     r->query_in_flight = false;
 }
 
@@ -1340,6 +1404,12 @@ static void begin_render_pass(PGRAPHState *pg)
     vkCmdBeginRenderPass(r->command_buffer, &render_pass_begin_info,
                          VK_SUBPASS_CONTENTS_INLINE);
     r->in_render_pass = true;
+    r->render_pass_views =
+        r->framebuffer_view_mask ? __builtin_popcount(r->framebuffer_view_mask)
+                                 : 1;
+    if (pgraph_vk_stereo_on()) {
+        pgraph_vk_stereo_render_pass_begun(r);
+    }
 
 }
 
@@ -1394,6 +1464,7 @@ void pgraph_vk_wait_for_submission(PGRAPHVkState *r, uint32_t idx)
     }
     VK_CHECK(vkWaitForFences(r->device, 1, &slot->fence, VK_TRUE, UINT64_MAX));
 }
+
 
 void pgraph_vk_submit_batch(PGRAPHState *pg, FinishReason finish_reason)
 {
@@ -1499,13 +1570,12 @@ void pgraph_vk_submit_batch(PGRAPHState *pg, FinishReason finish_reason)
     r->submit_count = submit_idx + 1;
     r->in_command_buffer = false;
     r->recycle_pending = true;
+    pg->query_eager_draws = 0;
 }
 
 void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-
-    NV2A_PHASE_LEAF(PF_LEAF_SUBMIT);
 
     assert(!r->in_draw);
     assert(r->debug_depth == 0);
@@ -1700,8 +1770,6 @@ static void begin_pre_draw(PGRAPHState *pg)
     assert(!r->color_binding || r->color_binding->initialized);
     assert(!r->zeta_binding || r->zeta_binding->initialized);
 
-    NV2A_PHASE_MSUB(PF_MSUB_PIPE);
-
     if (!pg->clearing && pg->zpass_pixel_count_enable &&
         r->query_epoch_base + (uint32_t)r->num_queries_in_flight -
                 r->query_region_origin >=
@@ -1719,6 +1787,11 @@ static void begin_pre_draw(PGRAPHState *pg)
     }
 
     bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
+    if (r->framebuffer_index > 0 &&
+        r->framebuffer_view_mask !=
+            r->pipeline_binding->key.render_pass_state.view_mask) {
+        r->framebuffer_dirty = true;
+    }
 
     if (r->framebuffer_dirty || render_pass_dirty) {
         pgraph_vk_ensure_not_in_render_pass(pg);
@@ -1731,7 +1804,6 @@ static void begin_pre_draw(PGRAPHState *pg)
         r->framebuffer_dirty = false;
     }
     if (!pg->clearing) {
-        NV2A_PHASE_MSUB(PF_MSUB_DESC);
         pgraph_vk_update_descriptor_sets(pg);
     }
     if (r->framebuffer_index == 0) {
@@ -1762,8 +1834,6 @@ static void begin_draw(PGRAPHState *pg)
 
     assert(r->in_command_buffer);
 
-    NV2A_PHASE_MSUB(PF_MSUB_PIPE);
-
     bool rpchurn_reopen = false;
 
     if (r->batch_qreset_enabled) {
@@ -1778,19 +1848,16 @@ static void begin_draw(PGRAPHState *pg)
         if (!pg->clearing && pg->zpass_pixel_count_enable) {
             if (r->new_query_needed && r->query_in_flight) {
                 rpchurn_reopen |= r->in_render_pass;
-                NV2A_PHASE_MSUB_REDIRECT(PF_MSUB_RPCHURN);
                 end_render_pass(r);
                 end_query(r);
             }
             if (!r->query_in_flight) {
                 rpchurn_reopen |= r->in_render_pass;
-                NV2A_PHASE_MSUB_REDIRECT(PF_MSUB_RPCHURN);
                 end_render_pass(r);
                 begin_query(r);
             }
         } else if (r->query_in_flight) {
             rpchurn_reopen |= r->in_render_pass && !pg->clearing;
-            NV2A_PHASE_MSUB_REDIRECT(PF_MSUB_RPCHURN);
             end_render_pass(r);
             end_query(r);
         }
@@ -1804,7 +1871,6 @@ static void begin_draw(PGRAPHState *pg)
 
     if (!r->in_render_pass) {
         if (rpchurn_reopen && !pg->clearing) {
-            NV2A_PHASE_MSUB_REDIRECT(PF_MSUB_RPCHURN);
             begin_render_pass(pg);
         } else {
             begin_render_pass(pg);
@@ -1884,6 +1950,7 @@ static void end_draw(PGRAPHState *pg)
     r->in_draw = false;
 }
 
+
 void pgraph_vk_draw_end(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -1903,6 +1970,10 @@ void pgraph_vk_draw_end(NV2AState *d)
     if (is_nop_draw) {
         NV2A_VK_DPRINTF("nop draw!\n");
         return;
+    }
+
+    if (pgraph_vk_stereo_on()) {
+        pgraph_vk_stereo_note_draw(d);
     }
 
     pgraph_vk_flush_draw(d);
@@ -1929,13 +2000,38 @@ static int compare_memory_sync_requirement_by_addr(const void *p1,
     return 0;
 }
 
-static void sync_vertex_ram_buffer(PGRAPHState *pg)
+static bool vertex_ram_syncs_in_guest_ram(PGRAPHState *pg)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
+    uint64_t ram_size = memory_region_size(d->vram);
+    static bool logged;
+
+    for (size_t i = 0; i < r->num_vertex_ram_buffer_syncs; i++) {
+        uint64_t addr = r->vertex_ram_buffer_syncs[i].addr;
+        uint64_t size = r->vertex_ram_buffer_syncs[i].size;
+        if (addr <= ram_size && size <= ram_size - addr) {
+            continue;
+        }
+        if (!logged) {
+            logged = true;
+            fprintf(stderr, "nv2a/vk: vertex range of %" PRIu64 " B at %" PRIu64 " leaves guest RAM (%" PRIu64
+                    " B): draw skipped; later skips are not logged\n", size, addr, ram_size);
+        }
+        r->num_vertex_ram_buffer_syncs = 0;
+        return false;
+    }
+    return true;
+}
+
+static bool sync_vertex_ram_buffer(PGRAPHState *pg)
+{
+    NV2AState *d = container_of(pg, NV2AState, pgraph);
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    bool war_route = false;
 
     if (r->num_vertex_ram_buffer_syncs == 0) {
-        return;
+        return false;
     }
 
     NV2A_VK_DGROUP_BEGIN("Sync vertex RAM buffer");
@@ -1995,19 +2091,38 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
 
         NV2A_VK_DPRINTF("- %d: %08"HWADDR_PRIx" %zd bytes", i, addr, size);
 
-        if (memory_region_test_and_clear_dirty(d->vram, addr, size,
-                                               DIRTY_MEMORY_NV2A)) {
+        bool dirty = memory_region_test_and_clear_dirty(d->vram, addr, size,
+                                                        DIRTY_MEMORY_NV2A);
+        bool stale = r->vtx_war_fix &&
+                     pgraph_vk_vertex_ram_range_stale(r, addr, size);
+
+        if (!dirty && !stale) {
+            continue;
+        }
+
+        if (dirty) {
             NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
             nv2a_profile_inc_counter(NV2A_PROF_VTX_RAM_WAR_WAIT);
-            pgraph_vk_wait_all_slots(r);
-            pgraph_vk_update_vertex_ram_buffer(pg, addr, d->vram_ptr + addr,
-                                               size);
         }
+
+        if (r->vtx_war_fix &&
+            pgraph_vk_vertex_ram_range_uploaded(r, addr, size)) {
+            pgraph_vk_download_surfaces_in_range_if_dirty(pg, addr, size);
+            pgraph_vk_mark_vertex_ram_range_stale(r, addr, size);
+            nv2a_profile_inc_counter(NV2A_PROF_VTX_WAR_ROUTED);
+            war_route = true;
+            continue;
+        }
+
+        pgraph_vk_wait_all_slots(r);
+        pgraph_vk_update_vertex_ram_buffer(pg, addr, d->vram_ptr + addr, size);
     }
 
     r->num_vertex_ram_buffer_syncs = 0;
 
     NV2A_VK_DGROUP_END();
+
+    return war_route;
 }
 
 void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
@@ -2282,7 +2397,8 @@ typedef struct VertexBufferRemap {
 } VertexBufferRemap;
 
 static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
-                                                    uint32_t num_vertices)
+                                                    uint32_t num_vertices,
+                                                    bool force_all)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
@@ -2308,7 +2424,7 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
             (r->vertex_attribute_offsets[attr_id] % element_size == 0);
         bool stride_valid = (desc->stride % element_size == 0);
 
-        if (offset_valid && stride_valid) {
+        if (!force_all && offset_valid && stride_valid) {
             continue;
         }
 
@@ -2326,10 +2442,10 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
 
     if (remap.attributes) {
         StorageBuffer *buffer = &r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING];
-        VkDeviceSize starting_offset = ROUND_UP(buffer->buffer_offset, 16);
-        size_t total_space_required =
-            (starting_offset - buffer->buffer_offset) + remap.buffer_space_required;
-        ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING, total_space_required);
+        if (!pgraph_vk_buffer_has_space_for(pg, BUFFER_VERTEX_INLINE_STAGING,
+                                            remap.buffer_space_required, 256)) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+        }
         buffer->buffer_offset = ROUND_UP(buffer->buffer_offset, 16);
     }
 
@@ -2379,6 +2495,59 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
     buffer->buffer_offset += remap.buffer_space_required;
 }
 
+static bool remap_copy_fits_inline_arena(PGRAPHState *pg, const VertexBufferRemap *remap,
+                                         uint32_t num_vertices)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    static bool logged;
+
+    if (!remap->attributes ||
+        pgraph_vk_buffer_has_space_for(pg, BUFFER_VERTEX_INLINE_STAGING,
+                                       remap->buffer_space_required, 256)) {
+        return true;
+    }
+    if (!logged) {
+        logged = true;
+        fprintf(stderr, "nv2a/vk: remap copy of %u vertices (%" PRIu64 " B) exceeds the inline vertex staging "
+                "arena (%" PRIu64 " B): draw skipped; later skips are not logged\n", num_vertices,
+                (uint64_t)remap->buffer_space_required,
+                (uint64_t)r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING].buffer_size);
+    }
+    return false;
+}
+
+static bool remap_copy_source_in_guest_ram(PGRAPHState *pg, const VertexBufferRemap *remap,
+                                           uint32_t num_vertices)
+{
+    NV2AState *d = container_of(pg, NV2AState, pgraph);
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    uint64_t ram_size = memory_region_size(d->vram);
+    static bool logged;
+
+    if (!remap->attributes || !num_vertices) {
+        return true;
+    }
+    for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
+        if (!(remap->attributes & (1 << attr_id))) {
+            continue;
+        }
+        uint64_t start = r->vertex_attribute_offsets[attr_id];
+        uint64_t end = start + (uint64_t)(num_vertices - 1) * remap->map[attr_id].old_stride +
+                       remap->map[attr_id].new_stride;
+        if (end <= ram_size) {
+            continue;
+        }
+        if (!logged) {
+            logged = true;
+            fprintf(stderr, "nv2a/vk: remap copy of %u vertices reads guest RAM %" PRIu64 "..%" PRIu64 ", past its end (%"
+                    PRIu64 " B): draw skipped; later skips are not logged\n", num_vertices, start, end, ram_size);
+        }
+        return false;
+    }
+    return true;
+}
+
+
 void pgraph_vk_flush_draw(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -2388,8 +2557,6 @@ void pgraph_vk_flush_draw(NV2AState *d)
         NV2A_VK_DPRINTF("No binding present!!!\n");
         return;
     }
-
-    NV2A_PHASE_MSUB_SCOPE(PF_MSUB_ATTR);
 
     r->num_vertex_ram_buffer_syncs = 0;
 
@@ -2410,16 +2577,27 @@ void pgraph_vk_flush_draw(NV2AState *d)
             min_element = MIN(pg->draw_arrays_start[i], min_element);
             max_element = MAX(max_element, pg->draw_arrays_start[i] + pg->draw_arrays_count[i]);
         }
-        sync_vertex_ram_buffer(pg);
-        VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element);
+        if (!vertex_ram_syncs_in_guest_ram(pg)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
+        bool war_route = sync_vertex_ram_buffer(pg);
+        VertexBufferRemap remap =
+            remap_unaligned_attributes(pg, max_element, war_route);
+        if (!remap_copy_fits_inline_arena(pg, &remap, max_element)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
+        if (!remap_copy_source_in_guest_ram(pg, &remap, max_element)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
 
         begin_pre_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_ATTR);
         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Draw Arrays");
         begin_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_DRAW);
         bind_vertex_buffer(pg, remap.attributes, 0);
         for (int i = 0; i < pg->draw_arrays_length; i++) {
             uint32_t start = pg->draw_arrays_start[i],
@@ -2452,18 +2630,29 @@ void pgraph_vk_flush_draw(NV2AState *d)
         pgraph_vk_bind_vertex_attributes(
             d, min_element, max_element, false, 0,
             pg->inline_elements[pg->inline_elements_length - 1]);
-        sync_vertex_ram_buffer(pg);
-        VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element + 1);
+        if (!vertex_ram_syncs_in_guest_ram(pg)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
+        bool war_route = sync_vertex_ram_buffer(pg);
+        VertexBufferRemap remap =
+            remap_unaligned_attributes(pg, max_element + 1, war_route);
+        if (!remap_copy_fits_inline_arena(pg, &remap, max_element + 1)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
+        if (!remap_copy_source_in_guest_ram(pg, &remap, max_element + 1)) {
+            NV2A_VK_DGROUP_END();
+            return;
+        }
 
         begin_pre_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_ATTR);
         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element + 1);
         VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
             pg, pg->inline_elements, index_data_size);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Inline Elements");
         begin_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_DRAW);
         bind_vertex_buffer(pg, remap.attributes, 0);
         vkCmdBindIndexBuffer(r->command_buffer,
                              r->storage_buffers[BUFFER_INDEX].buffer,
@@ -2500,13 +2689,11 @@ void pgraph_vk_flush_draw(NV2AState *d)
         ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING, offset);
 
         begin_pre_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_ATTR);
         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
             pg, data, sizes, r->num_active_vertex_attribute_descriptions);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Inline Buffer");
         begin_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_DRAW);
         bind_inline_vertex_buffer(pg, buffer_offset);
         vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
         end_draw(pg);
@@ -2544,14 +2731,12 @@ void pgraph_vk_flush_draw(NV2AState *d)
                                          vertex_size, index_count - 1);
 
         begin_pre_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_ATTR);
         void *inline_array_data = pg->inline_array;
         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
             pg, &inline_array_data, &inline_array_data_size, 1);
         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
                                      "Inline Array");
         begin_draw(pg);
-        NV2A_PHASE_MSUB(PF_MSUB_DRAW);
         bind_inline_vertex_buffer(pg, buffer_offset);
         vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
         end_draw(pg);

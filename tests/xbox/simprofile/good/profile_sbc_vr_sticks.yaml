@@ -1,0 +1,8 @@
+# Keyed by instance: the two VR sticks are the same device profile, told apart by `instance` on the port.
+# On no port: a profile in the library that nothing uses yet.
+schema: sim-profile/1
+kind: profile
+id: sbc_vr_sticks
+name: "Steel Battalion, VR sticks"
+target: steel_battalion
+bindings: { drive: sb_drive_stick, aim: sb_aim_stick }

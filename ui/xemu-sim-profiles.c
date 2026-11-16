@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * Copyright (C) 2026 the PenguinBox authors
  *
  * This program is free software; you can redistribute it and/or modify
@@ -60,7 +62,7 @@ const SimProfile *sim_profile_lookup(uint32_t title_id)
 
 #define XBE_HDR_MAX_LEN 0x8000u
 
-#define SIM_PROBE_INTERVAL_MS 250
+#define SIM_PROBE_INTERVAL_MS 100
 #define SIM_PROBE_IDLE_MS 1000
 
 static struct {
@@ -71,7 +73,9 @@ static struct {
     bool stopped_by_us;
     const SimProfile *gating;
     uint32_t last_title;
+    int64_t gate_opened_ms;
 } sim_gate;
+
 
 static bool sim_read_guest_u32(CPUState *cs, uint32_t vaddr, uint32_t *out)
 {
@@ -119,11 +123,16 @@ static void sim_gate_tick(void *opaque)
 
     if (sim_gate.disabled || sim_gate.gating != NULL) {
         if (sim_gate.gating != NULL) {
-            timer_mod(sim_gate.timer,
-                      qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
-                          SIM_PROBE_IDLE_MS);
+            bool released = false;
+            if (!released) {
+                timer_mod(sim_gate.timer,
+                          qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                              SIM_PROBE_IDLE_MS);
+                return;
+            }
+        } else {
+            return;
         }
-        return;
     }
 
     timer_mod(sim_gate.timer,
@@ -153,6 +162,7 @@ static void sim_gate_tick(void *opaque)
             profile->display_name);
 
     sim_gate.gating = profile;
+    sim_gate.gate_opened_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     if (runstate_is_running()) {
         sim_gate.stopped_by_us = true;
         vm_stop(RUN_STATE_PAUSED);
@@ -168,6 +178,14 @@ void sim_gate_init(bool device_layer_up)
     }
     sim_gate.armed = true;
     sim_gate.device_layer_up = device_layer_up;
+
+    if (getenv("XEMU_NO_SIM_PREFLIGHT") != NULL) {
+        fprintf(stderr, SIM_LOG_PREFIX
+                "XEMU_NO_SIM_PREFLIGHT set — pre-flight gate disabled for "
+                "this session\n");
+        sim_gate.disabled = true;
+        return;
+    }
 
     if (!g_config.input.sim_preflight_gate) {
         sim_gate.disabled = true;

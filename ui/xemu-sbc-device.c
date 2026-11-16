@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * Copyright (C) 2026 the PenguinBox authors
  *
  * This program is free software; you can redistribute it and/or modify
@@ -628,7 +630,8 @@ static void sbc_fail(int rc, const char *what)
     switch (g_sbc.status) {
     case SBC_DEV_NO_PERMISSION:
         sbc_set_detail("%s failed: %s (bus %03u addr %03u) - no permission to "
-                       "open %04x:%04x. Install the udev rule and replug.",
+                       "open %04x:%04x. Run the AppImage once with "
+                       "--install-sbc-rules (or install the udev rule), then replug.",
                        what, sbc_err_name(rc), bus, addr, SBC_USB_VENDOR_ID,
                        SBC_USB_PRODUCT_ID);
         break;
@@ -1300,4 +1303,69 @@ bool sbc_device_replay_file(const char *path)
     sbc_transport_set_source_changed();
     sbc_source_timer_arm();
     return true;
+}
+
+SbcDeviceStatus sbc_device_probe(char *detail, size_t detail_len)
+{
+    if (detail && detail_len) {
+        detail[0] = '\0';
+    }
+#ifdef CONFIG_USB_LIBUSB
+    libusb_context *ctx = NULL;
+    libusb_device **list = NULL;
+    SbcDeviceStatus st = SBC_DEV_ABSENT;
+    ssize_t n;
+
+    if (libusb_init(&ctx) != 0) {
+        if (detail && detail_len) {
+            snprintf(detail, detail_len, "libusb_init failed");
+        }
+        return SBC_DEV_ERROR;
+    }
+    n = libusb_get_device_list(ctx, &list);
+    for (ssize_t i = 0; i < n; i++) {
+        struct libusb_device_descriptor desc;
+        libusb_device_handle *h = NULL;
+        int rc;
+
+        if (libusb_get_device_descriptor(list[i], &desc) != 0 ||
+            desc.idVendor != SBC_USB_VENDOR_ID ||
+            desc.idProduct != SBC_USB_PRODUCT_ID) {
+            continue;
+        }
+        rc = libusb_open(list[i], &h);
+        if (rc == 0) {
+            libusb_close(h);
+            st = SBC_DEV_READY;
+        } else {
+            st = sbc_status_from_libusb(rc);
+            if (st == SBC_DEV_ABSENT) {
+                st = SBC_DEV_ERROR;
+            }
+        }
+        if (detail && detail_len) {
+            snprintf(detail, detail_len, "%04x:%04x on bus %03u addr %03u: %s",
+                     SBC_USB_VENDOR_ID, SBC_USB_PRODUCT_ID,
+                     libusb_get_bus_number(list[i]),
+                     libusb_get_device_address(list[i]),
+                     rc == 0 ? "openable" : sbc_err_name(rc));
+        }
+        break;
+    }
+    if (n >= 0) {
+        libusb_free_device_list(list, 1);
+    }
+    libusb_exit(ctx);
+    return st;
+#else
+    if (detail && detail_len) {
+        snprintf(detail, detail_len, "this build has no libusb");
+    }
+    return SBC_DEV_ERROR;
+#endif
+}
+
+bool sbc_device_host_reader_armed(void)
+{
+    return sbc_host_reader_armed();
 }

@@ -1,0 +1,12 @@
+schema: sim-profile/1
+kind: rig
+id: pod_vr
+game: { title_id: 0x00000002, name: "synthetic pod fixture" }
+target: xbox_duke
+devices:
+  - profile: vr_twin_throttles
+    instance: pod
+    bindings: pod_duke
+    placement: { side: 0.25, height: -0.35, forward: 0.30 }
+    params: { power: sum, steerFullLock: 1.0 }
+    when: [ always ]

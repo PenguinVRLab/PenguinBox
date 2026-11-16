@@ -18,7 +18,6 @@
  */
 
 #include "renderer.h"
-#include "hw/xbox/nv2a/pgraph/phase_timers.h"
 
 static void create_command_pool(PGRAPHState *pg)
 {
@@ -143,7 +142,6 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, r->single_time_fence));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
     {
-        NV2A_PHASE_MSUB_REDIRECT(PF_MSUB_SYNCTEX);
         VK_CHECK(vkWaitForFences(r->device, 1, &r->single_time_fence, VK_TRUE,
                                  UINT64_MAX));
     }

@@ -136,7 +136,19 @@ if have_system
     'test-bufferiszero': [],
     'test-smp-parse': [qom, meson.project_source_root() / 'hw/core/machine-smp.c'],
     'test-vmstate': [migration, io],
-    'test-yank': ['socket-helpers.c', qom, io, chardev]
+    'test-yank': ['socket-helpers.c', qom, io, chardev],
+    # PenguinBox PadXR actions + wrist pinch (pure C, no glib; doc 106 XA1/XA4)
+    'test-vr-padxr-actions': [meson.project_source_root() / 'hw/xbox/nv2a/pgraph/vk/vr_padxr_actions.c'],
+    # PenguinBox UI panel placement/ray/come-back (pure, header-only; doc 102 X-UI-1/5)
+    'test-vr-ui-panel': [],
+    # PenguinBox X-UI-3 pause tick's decision (pure, header-only; doc 102 §5.1 option a)
+    'test-vr-ui-pause-tick': [],
+    # PenguinBox input gate (the SBC probe sees no aim, poke or select while the UI owns input) and the hands suggestion
+    'test-vr-xr-input-pure': [meson.project_source_root() / 'hw/xbox/nv2a/pgraph/vk/vr_padxr_actions.c'],
+    # PenguinBox XID report while a UI owns the pad: the headset UI gives the guest the pad at rest
+    'test-xid-ui-gate': [],
+    # PenguinBox: the compute buffer pair's need arithmetic (pure, header-only)
+    'test-nv2a-compute-need': [],
   }
   if config_host_data.get('CONFIG_INOTIFY1')
     tests += {'test-util-filemonitor': []}
@@ -175,6 +187,22 @@ slow_tests = {
   'test-crypto-tlssession': 90,
   'test-replication': 60,
 }
+
+# PenguinBox PadXR, the pure core (framework doc 101 §9, step X1): plain C
+# with no QEMU object and no glib, so it is built on its own rather than in
+# the loop below. Its data (the shared merge vectors, doc 109 Q2; the
+# registry's member manifest, doc 109 Q8) is read from this directory.
+padxr_pgraph = '../../hw/xbox/nv2a/pgraph/'
+test_vr_padxr_core = executable('test-vr-padxr-core',
+  files('test-vr-padxr-core.c',
+        padxr_pgraph / 'vr_padxr_core.c',
+        padxr_pgraph / 'vr_padxr_profiles.c'),
+  include_directories: include_directories(padxr_pgraph),
+  c_args: ['-DPADXR_DATA_DIR="' + meson.current_source_dir() + '"'],
+  dependencies: [libm])
+test('test-vr-padxr-core', test_vr_padxr_core,
+     protocol: 'tap',
+     suite: ['unit'])
 
 foreach test_name, extra: tests
   src = [test_name + '.c']

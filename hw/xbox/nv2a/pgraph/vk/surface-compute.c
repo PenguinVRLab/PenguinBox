@@ -408,6 +408,7 @@ void pgraph_vk_compute_finish_complete(PGRAPHVkState *r)
             r->compute.descriptor_set_index;
     }
     r->compute.descriptor_set_index = 0;
+    pgraph_vk_compute_pair_grow(r);
 }
 
 static int get_workgroup_size_for_output_units(PGRAPHVkState *r, int output_units)

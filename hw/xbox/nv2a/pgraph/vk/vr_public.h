@@ -16,7 +16,8 @@ void xemu_vr_request_recenter(void);
 
 bool xemu_vr_active(void);
 
-void xemu_vr_request_hunt_dump(void);
+void xemu_vr_hands_trace_mark(void);
+
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,37 @@
+# Emulated target: Xbox Duke / Controller S.
+# Control names are the xemu_vr enums lower-cased, without the CONTROLLER_BUTTON_ / CONTROLLER_AXIS_
+# prefix: ui/xemu-input.h:43-58 (buttons), :132-139 (axes), branch claude/sim-config-tech-stack-4570wk
+# at 205d5f4. Domains are what the guest sees (docs/build_brief.md 4.1/4.2; design of record 3.2/3.3):
+# sticks int16 bipolar, triggers uint8 unipolar, six pressure-sensitive face buttons 0..255
+# (hw/xbox/xid.c:88 currently drives them 0 or 0xff). GUIDE is an extension, not a Duke control.
+# Art (work/0021): devices/art/xbox_duke.svg, an ORIGINAL schematic of a generic two-stick gamepad (no manufacturer
+# image was used); every control is anchored on the part of it that carries the control.
+schema: sim-profile/1
+kind: target
+id: xbox_duke
+name: "Xbox controller (Duke)"
+art: devices/art/xbox_duke.svg
+core: xbox
+controls:
+  - { id: left_stick_x,  kind: axis, min: -32768, rest: 0, max: 32767, anchor: [136, 165] }
+  - { id: left_stick_y,  kind: axis, min: -32768, rest: 0, max: 32767, anchor: [150, 151] }
+  - { id: right_stick_x, kind: axis, min: -32768, rest: 0, max: 32767, anchor: [371, 265] }
+  - { id: right_stick_y, kind: axis, min: -32768, rest: 0, max: 32767, anchor: [385, 251] }
+  - { id: left_trigger,  kind: axis, min: 0, rest: 0, max: 255, anchor: [140, 70] }
+  - { id: right_trigger, kind: axis, min: 0, rest: 0, max: 255, anchor: [460, 70] }
+  - { id: a,     kind: button, analog: { min: 0, rest: 0, max: 255 }, anchor: [455, 195] }
+  - { id: b,     kind: button, analog: { min: 0, rest: 0, max: 255 }, anchor: [485, 165] }
+  - { id: x,     kind: button, analog: { min: 0, rest: 0, max: 255 }, anchor: [425, 165] }
+  - { id: y,     kind: button, analog: { min: 0, rest: 0, max: 255 }, anchor: [455, 135] }
+  - { id: black, kind: button, analog: { min: 0, rest: 0, max: 255 }, anchor: [526, 198] }
+  - { id: white, kind: button, analog: { min: 0, rest: 0, max: 255 }, anchor: [500, 222] }
+  - { id: dpad_up,    kind: button, anchor: [215, 247] }
+  - { id: dpad_down,  kind: button, anchor: [215, 283] }
+  - { id: dpad_left,  kind: button, anchor: [197, 265] }
+  - { id: dpad_right, kind: button, anchor: [233, 265] }
+  - { id: start, kind: button, anchor: [324, 206] }
+  - { id: back,  kind: button, anchor: [276, 206] }
+  - { id: lstick, kind: button, anchor: [150, 165] }
+  - { id: rstick, kind: button, anchor: [385, 265] }
+outputs:
+  - { transport: sdl_rumble, motors: [low_freq, high_freq] }

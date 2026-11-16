@@ -14,6 +14,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "xemu-version.h"
 #include "system/address-spaces.h"
 #include "system/ioport.h"
 #include "exec/gdbstub.h"
@@ -29,6 +30,7 @@
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "system/system.h"
+#include "exec/xemu-tblookup.h"
 
 bool hmp_handle_error(Monitor *mon, Error *err)
 {
@@ -71,9 +73,9 @@ void hmp_info_version(Monitor *mon, const QDict *qdict)
 
     info = qmp_query_version(NULL);
 
-    monitor_printf(mon, "%" PRId64 ".%" PRId64 ".%" PRId64 "%s\n",
+    monitor_printf(mon, "%" PRId64 ".%" PRId64 ".%" PRId64 "%s xemu=%s commit=%s\n",
                    info->qemu->major, info->qemu->minor, info->qemu->micro,
-                   info->package);
+                   info->package, xemu_version, xemu_commit);
 
     qapi_free_VersionInfo(info);
 }
@@ -270,6 +272,7 @@ void hmp_log(Monitor *mon, const QDict *qdict)
     if (!qemu_set_log(mask, &err)) {
         error_report_err(err);
     }
+    xemu_fastptr_gate_close_all();
 }
 
 void hmp_gdbserver(Monitor *mon, const QDict *qdict)

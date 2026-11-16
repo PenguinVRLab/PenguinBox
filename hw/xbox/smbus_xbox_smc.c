@@ -135,6 +135,7 @@ static int smc_write_data(SMBusDevice *dev, uint8_t *buf, uint8_t len)
         break;
 
     case SMC_REG_ERROR_WRITE:
+        fprintf(stderr, "xbox-smc: kernel wrote boot error code 0x%02x (%d)\n", buf[0], buf[0]);
         smc->error_reg = buf[0];
         break;
 

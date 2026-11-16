@@ -27,42 +27,42 @@
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "qemu/compiler.h"
 #include "ui/xemu-settings.h"
-#include "hw/xbox/nv2a/pgraph/phase_timers.h"
 #include "renderer.h"
+#include "compute_need.h"
 
 const int num_invalid_surfaces_to_keep = 10;
 const int max_surface_frame_time_delta = 5;
 
-void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
+
+static bool compute_need_fits(PGRAPHState *pg, Nv2aComputeNeed need,
+                              bool upload)
 {
-    g_config.display.quality.surface_scale = scale < 1 ? 1 : scale;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    uint64_t limit = UINT64_MAX;
 
-    qemu_mutex_lock(&d->pfifo.lock);
-    qatomic_set(&d->pfifo.halt, true);
-    qemu_mutex_unlock(&d->pfifo.lock);
 
-    qemu_mutex_lock(&d->pgraph.lock);
-    qemu_event_reset(&d->pgraph.vk_renderer_state->dirty_surfaces_download_complete);
-    qatomic_set(&d->pgraph.vk_renderer_state->download_dirty_surfaces_pending, true);
-    qemu_mutex_unlock(&d->pgraph.lock);
-    qemu_mutex_lock(&d->pfifo.lock);
-    pfifo_kick(d);
-    qemu_mutex_unlock(&d->pfifo.lock);
-    qemu_event_wait(&d->pgraph.vk_renderer_state->dirty_surfaces_download_complete);
+    if (need.dst <= limit && need.src <= limit &&
+        pgraph_vk_compute_pair_make_room(pg, need.dst, need.src,
+                                         upload ? "upload" : "download")) {
+        return true;
+    }
+    uint64_t dst_size =
+        MIN(r->storage_buffers[BUFFER_COMPUTE_DST].buffer_size, limit);
+    uint64_t src_size =
+        MIN(r->storage_buffers[BUFFER_COMPUTE_SRC].buffer_size, limit);
 
-    qemu_mutex_lock(&d->pgraph.lock);
-    qemu_event_reset(&d->pgraph.flush_complete);
-    qatomic_set(&d->pgraph.flush_pending, true);
-    qemu_mutex_unlock(&d->pgraph.lock);
-    qemu_mutex_lock(&d->pfifo.lock);
-    pfifo_kick(d);
-    qemu_mutex_unlock(&d->pfifo.lock);
-    qemu_event_wait(&d->pgraph.flush_complete);
 
-    qemu_mutex_lock(&d->pfifo.lock);
-    qatomic_set(&d->pfifo.halt, false);
-    pfifo_kick(d);
-    qemu_mutex_unlock(&d->pfifo.lock);
+    static bool logged;
+    if (!logged) {
+        logged = true;
+        fprintf(stderr,
+                "nv2a: depth/stencil %s skipped: it needs %" PRIu64 " + %"
+                PRIu64 " bytes of the compute buffers, %" PRIu64 " + %" PRIu64
+                " usable at scale %u; later skips are not logged\n",
+                upload ? "upload" : "download", need.dst, need.src, dst_size,
+                src_size, pg->surface_scale_factor);
+    }
+    return false;
 }
 
 unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d)
@@ -70,10 +70,18 @@ unsigned int pgraph_vk_get_surface_scale_factor(NV2AState *d)
     return d->pgraph.surface_scale_factor;
 }
 
-void pgraph_vk_reload_surface_scale_factor(PGRAPHState *pg)
+void pgraph_vk_latch_surface_scale_factor(PGRAPHState *pg)
 {
     int factor = g_config.display.quality.surface_scale;
-    pg->surface_scale_factor = MAX(factor, 1);
+    pg->surface_scale_factor = nv2a_surface_scale_clamp(factor);
+    if ((int)pg->surface_scale_factor != factor) {
+        fprintf(stderr, "nv2a/vk: display.quality.surface_scale = %d is outside "
+                "1..%d: the Vulkan renderer runs at %ux\n", factor,
+                NV2A_SURFACE_SCALE_MAX, pg->surface_scale_factor);
+    }
+    fprintf(stderr, "nv2a/vk: internal resolution scale %ux, read at renderer "
+            "start (a change applies after a restart)\n",
+            pg->surface_scale_factor);
 }
 
 static void get_surface_dimensions(PGRAPHState const *pg, unsigned int *width,
@@ -206,8 +214,6 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         return;
     }
 
-    NV2A_PHASE_LEAF(PF_LEAF_DOWNLOAD);
-
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
 
     bool use_compute_to_convert_depth_stencil_format =
@@ -219,6 +225,18 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
         surface->host_fmt.vk_format == VK_FORMAT_D16_UNORM;
 
     assert(no_conversion_necessary);
+
+    if (use_compute_to_convert_depth_stencil_format) {
+        unsigned int need_w = surface->width, need_h = surface->height;
+        pgraph_apply_scaling_factor(pg, &need_w, &need_h);
+        Nv2aComputeNeed need = nv2a_cn_download(
+            (uint64_t)surface->width * surface->height,
+            (uint64_t)need_w * need_h, pg->surface_scale_factor != 1,
+            r->device_props.limits.minStorageBufferOffsetAlignment);
+        if (!compute_need_fits(pg, need, false)) {
+            return;
+        }
+    }
 
     bool compute_needs_finish = (use_compute_to_convert_depth_stencil_format &&
                                  pgraph_vk_compute_needs_finish(r));
@@ -535,43 +553,6 @@ static void download_surface(NV2AState *d, SurfaceBinding *surface, bool force)
     download_surface_to_buffer(d, surface, d->vram_ptr + surface->vram_addr);
     surface->dl_frame++;
 
-    {
-        static int dump_mode = -1;
-        static hwaddr dump_addr;
-        if (dump_mode < 0) {
-            const char *e = getenv("XEMU_SURF_DUMP");
-            if (!e) { dump_mode = 0; }
-            else if (!strcmp(e, "auto")) { dump_mode = 1; }
-            else { dump_mode = 2; dump_addr = (hwaddr)strtoull(e, NULL, 16); }
-        }
-        bool hit = surface->color &&
-            ((dump_mode == 2 && surface->vram_addr == dump_addr) ||
-             (dump_mode == 1 && surface->width <= 512 &&
-              surface->height <= 512));
-        if (hit) {
-            char path[128];
-            snprintf(path, sizeof(path),
-                     "/tmp/surf-dump-%08" HWADDR_PRIx "-%ux%u.ppm",
-                     surface->vram_addr, surface->width, surface->height);
-            FILE *f = fopen(path, "wb");
-            if (f) {
-                unsigned w = surface->width, h = surface->height, bpp =
-                    surface->fmt.bytes_per_pixel;
-                const uint8_t *base = d->vram_ptr + surface->vram_addr;
-                fprintf(f, "P6\n%u %u\n255\n", w, h);
-                for (unsigned y = 0; y < h; y++) {
-                    for (unsigned x = 0; x < w; x++) {
-                        const uint8_t *px = base + y * surface->pitch + x * bpp;
-                        uint8_t rgb[3] = { bpp >= 3 ? px[2] : px[0],
-                                           bpp >= 2 ? px[1] : px[0],
-                                           px[0] };
-                        fwrite(rgb, 1, 3, f);
-                    }
-                }
-                fclose(f);
-            }
-        }
-    }
 
     memory_region_set_client_dirty(d->vram, surface->vram_addr,
                                    surface->pitch * surface->height,
@@ -600,12 +581,7 @@ void pgraph_vk_wait_for_surface_download(SurfaceBinding *surface)
         qatomic_set(&d->pgraph.vk_renderer_state->downloads_pending, true);
         pfifo_kick(d);
         qemu_mutex_unlock(&d->pfifo.lock);
-        bool pt = nv2a_phase_timers_on();
-        int64_t pt_t0 = pt ? nv2a_phase_now_ns() : 0;
         qemu_event_wait(&d->pgraph.vk_renderer_state->downloads_complete);
-        if (pt) {
-            nv2a_phase_add_dl_wait(pt_t0);
-        }
     }
 }
 
@@ -614,16 +590,10 @@ void pgraph_vk_process_pending_downloads(NV2AState *d)
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     SurfaceBinding *surface;
 
-    bool pt = nv2a_phase_timers_on();
-    int64_t pt_t0 = pt ? nv2a_phase_now_ns() : 0;
-
     QTAILQ_FOREACH(surface, &r->surfaces, entry) {
         download_surface(d, surface, false);
     }
 
-    if (pt) {
-        nv2a_phase_add_dl_proc(pt_t0);
-    }
 
     qatomic_set(&r->downloads_pending, false);
     qemu_event_set(&r->downloads_complete);
@@ -660,12 +630,7 @@ static void wait_for_surface_downloads(NV2AState *d)
     qatomic_set(&r->downloads_pending, true);
     pfifo_kick(d);
     qemu_mutex_unlock(&d->pfifo.lock);
-    bool pt = nv2a_phase_timers_on();
-    int64_t pt_t0 = pt ? nv2a_phase_now_ns() : 0;
     qemu_event_wait(&r->downloads_complete);
-    if (pt) {
-        nv2a_phase_add_dl_wait(pt_t0);
-    }
 
     if (is_main_thread) {
         bql_lock();
@@ -684,11 +649,6 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
         nv2a_profile_inc_counter(NV2A_PROF_SURF_CPU_READ);
     }
 
-    static int access_log_budget = -1;
-    if (access_log_budget < 0) {
-        access_log_budget = getenv("XEMU_SURF_ACCESS_LOG") ? 200 : 0;
-    }
-
     qemu_mutex_lock(&d->pgraph.lock);
 
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
@@ -702,20 +662,6 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
 
         hwaddr offset = addr - surface->vram_addr;
 
-        if (access_log_budget > 0) {
-            access_log_budget--;
-            fprintf(stderr,
-                    "surf-access: %s addr=%08" HWADDR_PRIx
-                    " off=%06" HWADDR_PRIx " len=%" HWADDR_PRIu
-                    " surf=%08" HWADDR_PRIx " %ux%u %s draw_dirty=%d"
-                    " upload_pending=%d\n",
-                    write ? "W" : "R", addr, offset, len,
-                    surface->vram_addr, surface->width, surface->height,
-                    surface->color ? "color" : "zeta",
-                    surface->draw_dirty, surface->upload_pending);
-            fprintf(stderr, "surf-access:   bound_color=%d bound_zeta=%d\n",
-                    surface == r->color_binding, surface == r->zeta_binding);
-        }
 
         if (write) {
             trace_nv2a_pgraph_surface_cpu_write(surface->vram_addr, offset);
@@ -787,12 +733,8 @@ void pgraph_vk_refresh_predl_toggle(void)
     static int forced_off = -1;
     if (forced_off < 0) {
         forced_off = getenv("XEMU_NO_PREDICTIVE_READBACK") ? 1 : 0;
-        watch = getenv("XEMU_PREDL_TOGGLE_FILE");
-        if (!watch) {
-            watch = "/tmp/predl-off";
-        }
     }
-    bool now_on = !forced_off && (access(watch, F_OK) != 0);
+    bool now_on = !forced_off && (!watch || access(watch, F_OK) != 0);
     static int last = -1;
     if ((int)now_on != last) {
         fprintf(stderr, "predl: predictive readback %s\n",
@@ -814,11 +756,7 @@ void pgraph_vk_refresh_narrowfence_toggle(void)
         } else if (getenv("XEMU_NARROW_FENCE")) {
             forced = 1;
         } else {
-            forced = 2;
-            watch = getenv("XEMU_NARROWFENCE_TOGGLE_FILE");
-            if (!watch) {
-                watch = "/tmp/narrowfence-on";
-            }
+            forced = 0;
         }
     }
     bool now_on = (forced == 1) ||
@@ -938,10 +876,17 @@ static bool alias_surfaces_enabled(void)
         if (getenv("XEMU_NO_ALIAS_SURFACES")) {
             state = 0;
         } else {
-            state = getenv("XEMU_ALIAS_SURFACES") ? 1 : 0;
+            if (getenv("XEMU_ALIAS_SURFACES")) {
+                state = 1;
+            } else {
+                if (xemu_perf_title_state() == 0) {
+                    return false;
+                }
+                state = xemu_perf_title_validated() ? 1 : 0;
+            }
             if (state == 1) {
                 fprintf(stderr,
-                        "nv2a: XEMU_ALIAS_SURFACES on — small surface creates "
+                        "nv2a: alias-surfaces ON (validated title) — small surface creates "
                         "keep large overlapped parents resident (no "
                         "evict+download cascade)\n");
             }
@@ -1078,7 +1023,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
         .extent.height = height,
         .extent.depth = 1,
         .mipLevels = 1,
-        .arrayLayers = 1,
+        .arrayLayers = surface->layers,
         .format = surface->host_fmt.vk_format,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1114,6 +1059,22 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
                                &surface->image_view));
 
+    surface->image_view_layers = VK_NULL_HANDLE;
+    if (surface->layers > 1) {
+        image_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        image_view_create_info.subresourceRange.layerCount = surface->layers;
+        VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
+                                   &surface->image_view_layers));
+    }
+    surface->image_view_layer1 = VK_NULL_HANDLE;
+    if (surface->layers > 1 && surface->color) {
+        image_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        image_view_create_info.subresourceRange.baseArrayLayer = 1;
+        image_view_create_info.subresourceRange.layerCount = 1;
+        VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
+                                   &surface->image_view_layer1));
+    }
+
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
@@ -1132,15 +1093,24 @@ static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
 {
     dst->image = src->image;
     dst->image_view = src->image_view;
+    dst->image_view_layers = src->image_view_layers;
+    dst->image_view_layer1 = src->image_view_layer1;
     dst->allocation = src->allocation;
     dst->image_layout = src->image_layout;
     dst->feedback_mode = false;
     dst->image_scratch = src->image_scratch;
     dst->image_scratch_current_layout = src->image_scratch_current_layout;
     dst->allocation_scratch = src->allocation_scratch;
+    dst->fb_snap_image = src->fb_snap_image;
+    dst->fb_snap_allocation = src->fb_snap_allocation;
+    dst->fb_snap_valid = false;
+    src->fb_snap_image = VK_NULL_HANDLE;
+    src->fb_snap_allocation = VK_NULL_HANDLE;
 
     src->image = VK_NULL_HANDLE;
     src->image_view = VK_NULL_HANDLE;
+    src->image_view_layers = VK_NULL_HANDLE;
+    src->image_view_layer1 = VK_NULL_HANDLE;
     src->allocation = VK_NULL_HANDLE;
     src->image_scratch = VK_NULL_HANDLE;
     src->image_scratch_current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1151,6 +1121,14 @@ static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface)
 {
     vkDestroyImageView(r->device, surface->image_view, NULL);
     surface->image_view = VK_NULL_HANDLE;
+    if (surface->image_view_layers != VK_NULL_HANDLE) {
+        vkDestroyImageView(r->device, surface->image_view_layers, NULL);
+        surface->image_view_layers = VK_NULL_HANDLE;
+    }
+    if (surface->image_view_layer1 != VK_NULL_HANDLE) {
+        vkDestroyImageView(r->device, surface->image_view_layer1, NULL);
+        surface->image_view_layer1 = VK_NULL_HANDLE;
+    }
 
     vmaDestroyImage(r->allocator, surface->image, surface->allocation);
     surface->image = VK_NULL_HANDLE;
@@ -1160,6 +1138,11 @@ static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface)
                     surface->allocation_scratch);
     surface->image_scratch = VK_NULL_HANDLE;
     surface->allocation_scratch = VK_NULL_HANDLE;
+    if (surface->fb_snap_image != VK_NULL_HANDLE) {
+        vmaDestroyImage(r->allocator, surface->fb_snap_image, surface->fb_snap_allocation);
+        surface->fb_snap_image = VK_NULL_HANDLE;
+        surface->fb_snap_allocation = VK_NULL_HANDLE;
+    }
 }
 
 static bool check_invalid_surface_is_compatibile(SurfaceBinding *surface,
@@ -1168,7 +1151,8 @@ static bool check_invalid_surface_is_compatibile(SurfaceBinding *surface,
     return surface->host_fmt.vk_format == target->host_fmt.vk_format &&
            surface->width == target->width &&
            surface->height == target->height &&
-           surface->host_fmt.usage == target->host_fmt.usage;
+           surface->host_fmt.usage == target->host_fmt.usage &&
+           surface->layers == target->layers;
 }
 
 static SurfaceBinding *
@@ -1240,6 +1224,7 @@ void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface)
     }
 }
 
+
 void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                                    bool force)
 {
@@ -1249,8 +1234,6 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     if (!(surface->upload_pending || force)) {
         return;
     }
-
-    NV2A_PHASE_LEAF(PF_LEAF_UPLOAD);
 
     pgraph_vk_wait_for_submission(r, surface->last_write_submit);
     pgraph_vk_wait_for_submission(r, surface->last_use_submit);
@@ -1279,10 +1262,26 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     surface->upload_pending = false;
     surface->draw_time = pg->draw_time;
+    surface->fb_snap_draw_time = surface->draw_time - 1;
 
     if (!surface->width || !surface->height) {
         surface->initialized = true;
         return;
+    }
+
+    if (surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+        unsigned int need_w = surface->width, need_h = surface->height;
+        pgraph_apply_scaling_factor(pg, &need_w, &need_h);
+        Nv2aComputeNeed need = nv2a_cn_upload(
+            (uint64_t)surface->height * surface->width *
+                surface->fmt.bytes_per_pixel,
+            (uint64_t)need_w * need_h,
+            r->device_props.limits.minStorageBufferOffsetAlignment);
+        if (!compute_need_fits(pg, need, true)) {
+            surface->initialized = true;
+            return;
+        }
     }
 
     uint8_t *data = d->vram_ptr;
@@ -1527,6 +1526,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     bool upscale = pg->surface_scale_factor > 1 &&
                    !use_compute_to_convert_depth_stencil_format;
 
+    unsigned int dst_layers = surface->layers;
+
     if (upscale) {
         VkImageBlit blitRegion = {
             .srcSubresource.aspectMask = surface->host_fmt.aspect,
@@ -1544,25 +1545,33 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
             .dstOffsets[1] = (VkOffset3D){scaled_width, scaled_height, 1},
         };
 
-        vkCmdBlitImage(cmd, surface->image_scratch,
-                       surface->image_scratch_current_layout, surface->image,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blitRegion,
-                       VK_FILTER_NEAREST);
+        for (unsigned int layer = 0; layer < dst_layers; layer++) {
+            blitRegion.dstSubresource.baseArrayLayer = layer;
+            vkCmdBlitImage(cmd, surface->image_scratch,
+                           surface->image_scratch_current_layout,
+                           surface->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &blitRegion, VK_FILTER_NEAREST);
+        }
     } else {
 
         for (int i = 0; i < num_regions; i++) {
             VkImageAspectFlags aspect = regions[i].imageSubresource.aspectMask;
-            VkImageCopy copy_region = {
-                .srcSubresource.aspectMask = aspect,
-                .srcSubresource.layerCount = 1,
-                .dstSubresource.aspectMask = aspect,
-                .dstSubresource.layerCount = 1,
-                .extent = regions[i].imageExtent,
-            };
-            vkCmdCopyImage(cmd, surface->image_scratch,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, surface->image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                           &copy_region);
+            for (unsigned int layer = 0; layer < dst_layers; layer++) {
+                VkImageCopy copy_region = {
+                    .srcSubresource.aspectMask = aspect,
+                    .srcSubresource.layerCount = 1,
+                    .dstSubresource.aspectMask = aspect,
+                    .dstSubresource.baseArrayLayer = layer,
+                    .dstSubresource.layerCount = 1,
+                    .extent = regions[i].imageExtent,
+                };
+                vkCmdCopyImage(cmd, surface->image_scratch,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               surface->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                               &copy_region);
+            }
         }
     }
 
@@ -1582,6 +1591,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     }
 
     surface->initialized = true;
+
 }
 
 static void compare_surfaces(SurfaceBinding const *a, SurfaceBinding const *b)
@@ -1680,6 +1690,11 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     target->draw_time = pg->draw_time;
     target->cleared = false;
 
+    target->layers = pgraph_vk_stereo_layers_for(target);
+    target->image_view_layers = VK_NULL_HANDLE;
+    target->image_view_layer1 = VK_NULL_HANDLE;
+    target->twin_dirty = false;
+
     target->initialized = false;
 }
 
@@ -1766,6 +1781,11 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         if (surface != NULL) {
             bool is_compatible =
                 check_surface_compatibility(surface, &target, false);
+            bool more_layers = target.layers > surface->layers;
+            if (is_compatible && more_layers) {
+                pgraph_vk_stereo_note_recreate(surface, target.layers);
+                is_compatible = false;
+            }
 
             void (*trace_fn)(uint32_t addr, uint32_t width, uint32_t height,
                              const char *layout, uint32_t anti_aliasing,
@@ -1820,7 +1840,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 surface->upload_pending |= mem_dirty;
                 pg->surface_zeta.buffer_dirty |= color;
                 should_create = false;
-            } else if (alias_surfaces_enabled() &&
+            } else if (!more_layers && alias_surfaces_enabled() &&
                        (uint64_t)target.size * 4 <= surface->size &&
                        !surface->upload_pending) {
                 nv2a_profile_inc_counter(NV2A_PROF_ALIAS_KEPT);
@@ -2034,8 +2054,6 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
     r->color_binding = NULL;
     r->zeta_binding = NULL;
     r->framebuffer_dirty = true;
-
-    pgraph_vk_reload_surface_scale_factor(pg);
 }
 
 void pgraph_vk_finalize_surfaces(PGRAPHState *pg)
@@ -2043,10 +2061,12 @@ void pgraph_vk_finalize_surfaces(PGRAPHState *pg)
     pgraph_vk_surface_flush(container_of(pg, NV2AState, pgraph));
 }
 
+
 void pgraph_vk_surface_flush(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
+
 
     pg->surface_color.draw_dirty = false;
     pg->surface_zeta.draw_dirty = false;
@@ -2060,6 +2080,4 @@ void pgraph_vk_surface_flush(NV2AState *d)
         invalidate_surface(d, s);
     }
     prune_invalid_surfaces(r, 0);
-
-    pgraph_vk_reload_surface_scale_factor(pg);
 }

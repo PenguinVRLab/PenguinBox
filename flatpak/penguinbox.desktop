@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=PenguinBox
+GenericName=Original Xbox Emulator
+Comment=Original Xbox emulation with VR (experimental)
+Exec=xemu
+Icon=com.penguinvrlabs.penguinbox
+Terminal=false
+Categories=Game;Emulator;

@@ -1,0 +1,9 @@
+# doc 31 6's shorthand form, verbatim shape: `bind: {<device control>: <target control>}`.
+schema: sim-profile/1
+kind: bindings
+id: pod_duke
+device: vr_twin_throttles
+target: xbox_duke
+bind:
+  Power: right_trigger
+  Steer: left_stick_x

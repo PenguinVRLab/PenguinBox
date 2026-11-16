@@ -43,6 +43,7 @@
 #include "../xemu-net.h"
 #include "../xemu-os-utils.h"
 #include "../xemu-xbe.h"
+#include "../xemu-machine-profile.h"
 
 #include "../thirdparty/fatx/fatx.h"
 
@@ -488,7 +489,9 @@ void MainMenuInputView::Draw()
         tc.w = 0.0f;
         ImGui::PushStyleColor(ImGuiCol_Header, tc);
 
-        if (ImGui::CollapsingHeader("Input Mapping")) {
+        if (bound_state->type == INPUT_DEVICE_SIM_PORT) {
+            ImGui::TextWrapped("This port is set up in the Sim Configurator; its mapping is edited there.");
+        } else if (ImGui::CollapsingHeader("Input Mapping")) {
             float p = ImGui::GetFrameHeight() * 0.3;
             ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(p, p));
             if (ImGui::BeginTable("input_remap_tbl", 2,
@@ -692,6 +695,15 @@ void MainMenuInputView::PopulateTableController(ControllerState *state)
     }
 }
 
+static bool RestartConfirmPopup(const char *id, bool *open);
+static bool scale_restart_ask;
+
+static int ConfiguredSurfaceScale()
+{
+    int s = g_config.display.quality.surface_scale;
+    return s < 1 ? 1 : (s > 10 ? 10 : s);
+}
+
 void MainMenuDisplayView::Draw()
 {
     SectionTitle("Renderer");
@@ -707,7 +719,7 @@ void MainMenuDisplayView::Draw()
         ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s",
                             nv2a_get_renderer_fallback_reason());
     }
-    int rendering_scale = nv2a_get_surface_scale_factor() - 1;
+    int rendering_scale = ConfiguredSurfaceScale() - 1;
     if (ChevronCombo("Internal resolution scale", &rendering_scale,
                      "1x\0"
                      "2x\0"
@@ -719,8 +731,27 @@ void MainMenuDisplayView::Draw()
                      "8x\0"
                      "9x\0"
                      "10x\0",
-                     "Increase surface scaling factor for higher quality")) {
+                     "Higher is sharper and uses more video memory. The Vulkan "
+                     "renderer applies a change when PenguinBox restarts")) {
         nv2a_set_surface_scale_factor(rendering_scale+1);
+    }
+    int running_scale = nv2a_get_surface_scale_factor();
+    ImGui::Text("Running now: %dx", running_scale);
+    if (ConfiguredSurfaceScale() != running_scale) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1),
+                           "Restart required: the internal resolution scale is "
+                           "set to %dx.", ConfiguredSurfaceScale());
+        if (ImGui::Button("Restart PenguinBox now##surface-scale")) {
+            scale_restart_ask = true;
+        }
+    }
+    if (RestartConfirmPopup("Restart PenguinBox?##surface-scale",
+                            &scale_restart_ask)) {
+        char err[256];
+        fprintf(stderr, "surface-scale: restarting PenguinBox to apply the "
+                "internal resolution scale (%dx)\n", ConfiguredSurfaceScale());
+        xemu_machine_profile_restart(err, sizeof(err));
+        xemu_queue_error_message(err);
     }
 
 #ifdef CONFIG_VULKAN
@@ -728,8 +759,8 @@ void MainMenuDisplayView::Draw()
                                     "Virtual Reality");
     Toggle("Enable VR", &g_config.vr.enable,
            "Head-tracked virtual screen via OpenXR (Vulkan renderer only). "
-           "Applies at next launch; the launcher manages this "
-           "(XEMU_VR=1). F8 recenters the screen.");
+           "Applies at next launch (or start with XEMU_VR=1). "
+           "F8 recenters the screen.");
     float t;
     t = (g_config.vr.screen_distance - 0.5f) / 4.5f;
     Slider("Screen distance", &t, "0.5 - 5 m (live)");
@@ -1489,6 +1520,121 @@ MainMenuSystemView::MainMenuSystemView() : m_dirty(false)
 {
 }
 
+static bool RestartConfirmPopup(const char *id, bool *open)
+{
+    if (*open) {
+        ImGui::OpenPopup(id);
+        *open = false;
+    }
+    bool yes = false;
+    if (ImGui::BeginPopupModal(id, NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("PenguinBox stops the console and starts again.");
+        ImGui::Text("The running game ends; unsaved progress is lost.");
+        if (ImGui::Button("Restart")) {
+            yes = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    return yes;
+}
+
+static bool restart_ask;
+
+static void DrawThisGameUpgrades()
+{
+    static std::string cached_path;
+    static int cached_global = -1;
+    static bool have = false;
+    static XemuMachineProfileState st;
+
+    const char *path = g_config.sys.files.dvd_path ? g_config.sys.files.dvd_path : "";
+    int global_mb = ((int)g_config.sys.mem_limit + 1) * 64;
+    if (!have || cached_path != path || cached_global != global_mb) {
+        xemu_machine_profile_evaluate(path, &st);
+        cached_path = path;
+        cached_global = global_mb;
+        have = true;
+    }
+
+    SectionTitle("This Game");
+    if (!st.disc_known) {
+        ImGui::TextDisabled("Load a game disc to choose its console upgrades.");
+        return;
+    }
+    ImGui::Text("%s (%s)", st.xbe.title_name[0] ? st.xbe.title_name : "Untitled",
+                st.title_id);
+
+    int choice = st.user_ram_mb == 128 ? 2 : (st.user_ram_mb == 64 ? 1 : 0);
+    std::string items = "Use global setting (" + std::to_string(global_mb) +
+                        " MiB) (Default)";
+    items.push_back('\0');
+    items += "64 MiB";
+    items.push_back('\0');
+    items += "128 MiB";
+    items.push_back('\0');
+    items.push_back('\0');
+    if (ChevronCombo("System Memory (this game)", &choice, items.c_str(),
+                     "Upgrade this game's console to 128 MiB, as modders do on "
+                     "real hardware. Applies when PenguinBox restarts; a "
+                     "snapshot loads only at the size it was saved with")) {
+        int mb = choice == 2 ? 128 : (choice == 1 ? 64 : 0);
+        char err[256];
+        if (xemu_machine_profile_set_choice(&st, mb, err, sizeof(err))) {
+            xemu_queue_error_message(err);
+        }
+        have = false;
+    }
+
+    int running = xemu_machine_profile_running_ram_mb();
+    ImGui::Text("Running now: %d MiB%s", running,
+                st.from_profile && st.effective_ram_mb == running ? " (this game's profile)" : "");
+    if (st.effective_ram_mb != running) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1),
+                           "Restart required: this game is set to %d MiB.",
+                           st.effective_ram_mb);
+        if (ImGui::Button("Restart PenguinBox now")) {
+            restart_ask = true;
+        }
+    }
+    if (RestartConfirmPopup("Restart PenguinBox?", &restart_ask)) {
+        char err[256];
+        xemu_machine_profile_restart(err, sizeof(err));
+        xemu_queue_error_message(err);
+    }
+    bool flag_set = st.xbe.init_flags & XEMU_XBE_INIT_LIMIT_DEVKIT_MEMORY;
+    if (st.effective_ram_mb > 64 && flag_set && !st.mod.clear_devkit_limit) {
+        ImGui::TextWrapped("Note: this game's executable carries the developer-kit "
+                           "64 MB limit flag. A debug BIOS keeps such a game in the "
+                           "low 64 MiB even on a 128 MiB console.");
+    }
+    if (st.mod.clear_devkit_limit && flag_set) {
+        ImGui::TextWrapped("Mod \"%s\" clears this game's developer-kit 64 MB limit "
+                           "flag as the game loads (128 MiB sessions only; the disc is "
+                           "not modified).", st.mod.mod_name);
+    }
+    if (st.mod.kind != XEMU_MP_MOD_NONE && st.mod.ram_mb) {
+        ImGui::TextWrapped("Mod \"%s\" %s %d MiB of system memory.", st.mod.mod_name,
+                           st.mod.kind == XEMU_MP_MOD_REQUIRES ? "requires" : "recommends",
+                           st.mod.ram_mb);
+        if (st.mod.ram_mb != st.effective_ram_mb) {
+            char label[64];
+            snprintf(label, sizeof(label), "Use %d MiB for this game", st.mod.ram_mb);
+            if (ImGui::Button(label)) {
+                char err[256];
+                if (xemu_machine_profile_set_choice(&st, st.mod.ram_mb, err, sizeof(err))) {
+                    xemu_queue_error_message(err);
+                }
+                have = false;
+            }
+        }
+    }
+}
+
 void MainMenuSystemView::Draw()
 {
     static const SDL_DialogFileFilter rom_file_filters[] = {
@@ -1526,6 +1672,8 @@ void MainMenuSystemView::Draw()
             "Select the attached AV pack")) {
         m_dirty = true;
     }
+
+    DrawThisGameUpgrades();
 
     SectionTitle("Files");
     FilePicker("MCPX Boot ROM", g_config.sys.files.bootrom_path,

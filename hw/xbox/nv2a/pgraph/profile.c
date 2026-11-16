@@ -17,9 +17,12 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+
 #include "hw/xbox/nv2a/nv2a_int.h"
 
 NV2AStats g_nv2a_stats;
+
+
 
 void nv2a_profile_increment(void)
 {
@@ -52,14 +55,18 @@ void nv2a_profile_flip_stall(void)
     g_nv2a_stats.frame_count++;
 
     if ((g_nv2a_stats.frame_count % 60) == 0) {
-        char buf[1536];
-        int n = snprintf(buf, sizeof(buf), "nv2a-prof: mspf=%d",
+        char buf[8192];
+        int n = snprintf(buf, sizeof(buf), "nv2a-prof: fps=%u mspf=%d",
+                         g_nv2a_stats.increment_fps,
                          g_nv2a_stats.frame_working.mspf);
         for (unsigned int i = 0; i < NV2A_PROF__COUNT; i++) {
             int v = g_nv2a_stats.frame_working.counters[i];
             if (v && n < (int)sizeof(buf) - 48) {
                 n += snprintf(buf + n, sizeof(buf) - n, " %s=%d",
                               nv2a_profile_get_counter_name(i), v);
+            } else if (v && n < (int)sizeof(buf) - 16) {
+                n += snprintf(buf + n, sizeof(buf) - n, " TRUNCATED=1");
+                n = sizeof(buf);
             }
         }
         fprintf(stderr, "%s\n", buf);

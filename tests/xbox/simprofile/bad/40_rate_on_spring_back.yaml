@@ -1,0 +1,13 @@
+# BAD fixture (S-74): bindings_sbc_keys.yaml with one change: the pedal key carries a rate as well (the pedal springs back). Load the good set with this file IN PLACE OF
+# bindings_sbc_keys.yaml; it must be refused with the code in MANIFEST.tsv.
+schema: sim-profile/1
+kind: bindings
+id: sbc_keys
+device: keyboard_104
+target: steel_battalion
+bind:
+  - { source: key_a, target: aiming_x, rate: -0.5 }
+  - { source: key_d, target: aiming_x, rate: 0.5 }
+  - { source: key_q, target: rotation_lever, value: -1.0, ramp: { press_ms: 150, release_ms: 100 } }
+  - { source: key_e, target: rotation_lever, value: 1.0, ramp: { press_ms: 150, release_ms: 100 } }
+  - { source: key_w, target: left_pedal, value: 1.0, rate: 0.5 }

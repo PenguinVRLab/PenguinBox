@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simmerge: the merge layer's end-to-end fixture (written for XB-6, not the app's).
+schema: sim-profile/1
+kind: device
+id: e2e_pad
+source: sdl_joystick
+inputs:
+  - { id: stick_x, kind: axis, min: -32768, rest: 0, max: 32767 }
+  - { id: stick_y, kind: axis, min: -32768, rest: 0, max: 32767, invert: true }
+  - { id: trig, kind: axis, min: 0, rest: 0, max: 1023 }
+  - { id: pedal_desc, kind: axis, min: 1023, rest: 1023, max: 0 }
+  - { id: btn_a, kind: button }
+  - { id: btn_b, kind: button }
+  - { id: pov, kind: hat }
+  - { id: gate, kind: detent, positions: [n, "1", r] }
+  - { id: btn_c, kind: button }

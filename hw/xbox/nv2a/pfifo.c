@@ -20,7 +20,6 @@
  */
 
 #include "nv2a_int.h"
-#include "hw/xbox/nv2a/pgraph/phase_timers.h"
 
 typedef struct RAMHTEntry {
     uint32_t handle;
@@ -142,6 +141,7 @@ static bool pfifo_puller_should_stall(NV2AState *d)
            qatomic_read(&d->pgraph.waiting_for_context_switch) ||
            !can_fifo_access(d);
 }
+
 
 static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
                                 uint32_t parameter, uint32_t *parameters,
@@ -427,32 +427,21 @@ void *pfifo_thread(void *arg)
         pgraph_process_pending(d);
 
         if (!d->pfifo.halt) {
-            bool pt = nv2a_phase_timers_on();
-            int64_t pt_method = pt ? nv2a_phase_method_begin() : 0;
             pfifo_run_pusher(d);
-            if (pt) {
-                nv2a_phase_method_end(pt_method);
-            }
         }
 
         {
-            NV2A_PHASE_LEAF(PF_LEAF_QUERIES);
             pgraph_process_pending_reports(d);
         }
 
         if (!d->pfifo.fifo_kick) {
             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
 
-            bool pt = nv2a_phase_timers_on();
-            int64_t pt_t0 = pt ? nv2a_phase_now_ns() : 0;
             if (d->pgraph.report_marker_pending) {
                 qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
             } else {
                 assert(!d->pgraph.report_marker_pending);
                 qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
-            }
-            if (pt) {
-                nv2a_phase_add_pfifo_idle(pt_t0);
             }
         }
 

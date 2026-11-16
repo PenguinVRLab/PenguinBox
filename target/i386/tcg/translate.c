@@ -34,6 +34,12 @@
 #include "decode-new.h"
 
 #include "exec/log.h"
+#include "exec/plugin-gen.h"
+#include "exec/xemu-tblookup.h"
+#include "accel/tcg/tb-jmp-cache.h"
+#include "accel/tcg/tb-hash.h"
+#include "xemu-tb-key.h"
+#include "tcg/tcg-temp-internal.h"
 
 static int g_use_hard_fpu;
 
@@ -2515,6 +2521,76 @@ static void gen_bnd_jmp(DisasContext *s)
     }
 }
 
+QEMU_BUILD_BUG_ON(sizeof(((CPUJumpCache *)0)->array[0]) != 16);
+#define XEMU_JC_ENTRY_SHIFT 4
+
+static void gen_lookup_and_goto_ptr(DisasContext *s)
+{
+#if TARGET_LONG_BITS == 32
+    if (xemu_tb_fastptr && !(tb_cflags(s->base.tb) & CF_NO_GOTO_PTR)) {
+        TCGLabel *slow = gen_new_label();
+        TCGv_i32 gate = tcg_temp_ebb_new_i32();
+        TCGv_i32 flags = tcg_temp_ebb_new_i32();
+        TCGv_i32 t32 = tcg_temp_ebb_new_i32();
+        TCGv_i32 cs_base = tcg_temp_ebb_new_i32();
+        TCGv_i32 pc = tcg_temp_ebb_new_i32();
+        TCGv_i32 h = tcg_temp_ebb_new_i32();
+        TCGv_i64 t64 = tcg_temp_ebb_new_i64();
+        TCGv_i64 u64 = tcg_temp_ebb_new_i64();
+        TCGv_ptr ent = tcg_temp_ebb_new_ptr();
+        TCGv_ptr hp = tcg_temp_ebb_new_ptr();
+        TCGv_ptr tb = tcg_temp_ebb_new_ptr();
+        bool noflags = false, nocflags = false, uncounted = false;
+
+        tcg_gen_ld8u_i32(gate, tcg_env, offsetof(X86CPU, parent_obj.xemu_fastptr_gate) - offsetof(X86CPU, env));
+        tcg_gen_brcondi_i32(TCG_COND_EQ, gate, 0, slow);
+
+        tcg_gen_ld_i32(flags, tcg_env, offsetof(CPUX86State, hflags));
+        tcg_gen_ld_i32(t32, tcg_env, offsetof(CPUX86State, eflags));
+        tcg_gen_andi_i32(t32, t32, X86_TB_KEY_EFLAGS_MASK);
+        tcg_gen_or_i32(flags, flags, t32);
+        tcg_gen_ld_i32(cs_base, tcg_env, offsetof(CPUX86State, segs[R_CS].base));
+        tcg_gen_add_i32(pc, cs_base, cpu_eip);
+
+        tcg_gen_shri_i32(h, pc, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
+        tcg_gen_xor_i32(h, h, pc);
+        tcg_gen_shri_i32(t32, h, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
+        tcg_gen_andi_i32(t32, t32, TB_JMP_PAGE_MASK);
+        tcg_gen_andi_i32(h, h, TB_JMP_ADDR_MASK);
+        tcg_gen_or_i32(h, h, t32);
+
+        tcg_gen_ld_ptr(ent, tcg_env, offsetof(X86CPU, parent_obj.tb_jmp_cache) - offsetof(X86CPU, env));
+        tcg_gen_extu_i32_i64(t64, h);
+        tcg_gen_shli_i64(t64, t64, XEMU_JC_ENTRY_SHIFT);
+        tcg_gen_trunc_i64_ptr(hp, t64);
+        tcg_gen_add_ptr(ent, ent, hp);
+        tcg_gen_ld_ptr(tb, ent, offsetof(CPUJumpCache, array[0].tb));
+        tcg_gen_brcondi_ptr(TCG_COND_EQ, tb, 0, slow);
+        tcg_gen_ld_i64(t64, ent, offsetof(CPUJumpCache, array[0].pc));
+        tcg_gen_extu_i32_i64(u64, pc);
+        tcg_gen_brcond_i64(TCG_COND_NE, t64, u64, slow);
+        tcg_gen_ld_i64(t64, tb, offsetof(TranslationBlock, cs_base));
+        tcg_gen_extu_i32_i64(u64, cs_base);
+        tcg_gen_brcond_i64(TCG_COND_NE, t64, u64, slow);
+        if (!noflags) {
+            tcg_gen_ld_i32(t32, tb, offsetof(TranslationBlock, flags));
+            tcg_gen_brcond_i32(TCG_COND_NE, t32, flags, slow);
+        }
+        if (!nocflags) {
+            tcg_gen_ld_i32(t32, tb, offsetof(TranslationBlock, cflags));
+            tcg_gen_ld_i32(gate, tcg_env, offsetof(X86CPU, parent_obj.tcg_cflags) - offsetof(X86CPU, env));
+            tcg_gen_brcond_i32(TCG_COND_NE, t32, gate, slow);
+        }
+
+        tcg_gen_ld_ptr(ent, tb, offsetof(TranslationBlock, tc.ptr));
+        tcg_gen_goto_ptr(ent);
+
+        gen_set_label(slow);
+    }
+#endif
+    tcg_gen_lookup_and_goto_ptr();
+}
+
 static void
 gen_eob(DisasContext *s, int mode)
 {
@@ -2540,7 +2616,7 @@ gen_eob(DisasContext *s, int mode)
         gen_helper_single_step(tcg_env);
     } else if (mode == DISAS_JUMP &&
                !inhibit_reset) {
-        tcg_gen_lookup_and_goto_ptr();
+        gen_lookup_and_goto_ptr(s);
     } else {
         tcg_gen_exit_tb(NULL, 0);
     }

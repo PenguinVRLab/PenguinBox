@@ -1,0 +1,12 @@
+schema: sim-profile/1
+kind: rig
+id: pgr2_wheel_rig
+game: { title_id: 0x00000001, name: "synthetic racing fixture" }
+target: xbox_duke
+devices:
+  - { profile: wheel, position: centre, bindings: pgr2_wheel }
+  - { profile: racing_pedals, position: floor, bindings: pgr2_pedals }
+  - { profile: th8a, position: right, bindings: pgr2_shifter }
+  - { profile: sinden_pedal, position: floor, bindings: pedal_as_x }
+outputs:
+  ffb: wheel

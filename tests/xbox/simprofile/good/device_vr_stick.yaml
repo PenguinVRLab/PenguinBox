@@ -1,0 +1,5 @@
+schema: sim-profile/1
+kind: device
+id: vr_stick
+source: vr_virtual
+catalogue: Stick

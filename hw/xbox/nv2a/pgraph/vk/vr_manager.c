@@ -8,6 +8,7 @@
 #include "renderer.h"
 #include "vr.h"
 #include "vr_internal.h"
+#include "vr_ui_panel.h"
 
 XemuVRState g_xemu_vr;
 
@@ -33,7 +34,7 @@ void xemu_vr_begin_bootstrap(PGRAPHState *pg)
         return;
     }
 
-    fprintf(stderr, "xemu-vr: VR enabled — bootstrapping OpenXR (Phase A)\n");
+    fprintf(stderr, "PenguinBox: VR enabled — bootstrapping OpenXR (Phase A)\n");
 
     if (!vr_xr_loader_init() ||
         !vr_xr_create_instance_and_system() ||
@@ -59,7 +60,7 @@ VkResult xemu_vr_create_instance(const VkInstanceCreateInfo *create_info,
         if (res == VK_SUCCESS) {
             return VK_SUCCESS;
         }
-        fprintf(stderr, "xemu-vr: instance creation through XR failed — "
+        fprintf(stderr, "PenguinBox: instance creation through XR failed — "
                         "aborting VR, falling back to plain Vulkan.\n");
         vr_abort_bootstrap();
     }
@@ -74,9 +75,27 @@ VkPhysicalDevice xemu_vr_get_physical_device(VkInstance instance)
 
     VkPhysicalDevice pd = vr_xr_get_vulkan_physical_device(instance);
     if (pd == VK_NULL_HANDLE) {
-        fprintf(stderr, "xemu-vr: OpenXR did not yield a physical device — "
+        fprintf(stderr, "PenguinBox: OpenXR did not yield a physical device — "
                         "aborting VR, using xemu's own selection.\n");
         vr_abort_bootstrap();
+        return pd;
+    }
+
+    const char *want = g_config.display.vulkan.preferred_physical_device;
+    if (want != NULL && want[0] != '\0') {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(pd, &props);
+        if (strcmp(props.deviceName, want) != 0) {
+            fprintf(stderr,
+                    "xemu-vr: OpenXR runtime mandates GPU '%s' but the "
+                    "display interop is configured for '%s'.\n"
+                    "xemu-vr: ABORTING VR (flat on the configured GPU) — "
+                    "restart the OpenXR runtime (WiVRn) on that GPU to get "
+                    "VR back.\n",
+                    props.deviceName, want);
+            vr_abort_bootstrap();
+            return VK_NULL_HANDLE;
+        }
     }
     return pd;
 }
@@ -91,7 +110,7 @@ VkResult xemu_vr_create_device(VkPhysicalDevice physical_device,
         if (res == VK_SUCCESS) {
             return VK_SUCCESS;
         }
-        fprintf(stderr, "xemu-vr: device creation through XR failed — "
+        fprintf(stderr, "PenguinBox: device creation through XR failed — "
                         "aborting VR, falling back to plain Vulkan.\n");
         vr_abort_bootstrap();
     }
@@ -105,21 +124,21 @@ void xemu_vr_on_device_created(PGRAPHState *pg)
     }
 
     if (!vr_xr_create_session(pg)) {
-        fprintf(stderr, "xemu-vr: session creation failed — aborting VR, "
+        fprintf(stderr, "PenguinBox: session creation failed — aborting VR, "
                         "running flat.\n");
         vr_abort_bootstrap();
         return;
     }
 
     if (!vr_compositor_start(pg)) {
-        fprintf(stderr, "xemu-vr: compositor start failed — aborting VR, "
+        fprintf(stderr, "PenguinBox: compositor start failed — aborting VR, "
                         "running flat.\n");
         vr_abort_bootstrap();
         return;
     }
 
     g_xemu_vr.session_running = true;
-    fprintf(stderr, "xemu-vr: VR active — headset presentation begins when "
+    fprintf(stderr, "PenguinBox: VR active — headset presentation begins when "
                     "the runtime reports the session READY.\n");
 }
 
@@ -133,10 +152,6 @@ void xemu_vr_request_recenter(void)
     qatomic_set(&g_xemu_vr.comp.recenter_requested, true);
 }
 
-void xemu_vr_request_hunt_dump(void)
-{
-    vr_camera_request_hunt_dump();
-}
 
 bool xemu_vr_active(void)
 {
@@ -145,7 +160,6 @@ bool xemu_vr_active(void)
 
 void xemu_vr_frame(PGRAPHState *pg)
 {
-    vr_camera_hunt_poll(pg);
 
     if (!g_xemu_vr.session_running) {
         return;
@@ -153,11 +167,26 @@ void xemu_vr_frame(PGRAPHState *pg)
 
     vr_xr_pump_events();
     if (g_xemu_vr.xr.lost) {
-        fprintf(stderr, "xemu-vr: session/instance lost — shutting VR down; "
+        fprintf(stderr, "PenguinBox: session/instance lost — shutting VR down; "
                         "flat rendering continues.\n");
         vr_abort_bootstrap();
         return;
     }
 
     vr_compositor_frame(pg);
+}
+
+bool xemu_vr_pause_tick(PGRAPHState *pg)
+{
+    if (!g_xemu_vr.session_running) {
+        return false;
+    }
+    vr_xr_pump_events();
+    if (g_xemu_vr.xr.lost) {
+        fprintf(stderr, "PenguinBox: session/instance lost while paused — "
+                        "shutting VR down; flat rendering continues.\n");
+        vr_abort_bootstrap();
+        return false;
+    }
+    return vr_compositor_pause_frame(pg);
 }

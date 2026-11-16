@@ -38,9 +38,19 @@ static RENDERDOC_API_1_6_0 *rdoc_api = NULL;
 int renderdoc_capture_frames = 0;
 bool renderdoc_trace_frames = false;
 
+static bool renderdoc_requested(void)
+{
+    const char *v = getenv("XEMU_RENDERDOC");
+    return v && *v && strcmp(v, "0") != 0;
+}
+
 void nv2a_dbg_renderdoc_init(void)
 {
     if (rdoc_api) {
+        return;
+    }
+
+    if (!renderdoc_requested()) {
         return;
     }
 

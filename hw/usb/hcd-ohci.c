@@ -905,7 +905,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
     }
 
     if (packet == NULL) {
-        packet = g_malloc(sizeof(USBActivePacket));
+        packet = g_new0(USBActivePacket, 1);
         usb_packet_init(&packet->usb_packet);
         packet->ep = ep;
         packet->async_complete = false;

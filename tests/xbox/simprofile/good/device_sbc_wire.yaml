@@ -1,0 +1,16 @@
+# The physical Steel Battalion controller as the wire presents it (brief 9.1, design 3.2).
+schema: sim-profile/1
+kind: device
+id: sbc_wire
+source: hid_usb
+match: { vid: 0x0a7b, pid: 0xd000 }
+inputs:
+  - { id: aiming_x, kind: axis, min: 0, rest: 0x8000, max: 0xFFFF }
+  - { id: left_pedal, kind: axis, min: 0, rest: 0, max: 0xFFFF }
+  - { id: main_weapon, kind: button }
+outputs:
+  - transport: hid
+    report_id: 0x02
+    length: 22
+    channels:
+      - { id: main_weapon, byte: 3, bit: 0, anchor: [402, 188] }

@@ -42,6 +42,7 @@ void tcg_gen_exit_tb(const TranslationBlock *tb, unsigned idx);
 void tcg_gen_goto_tb(unsigned idx);
 
 void tcg_gen_lookup_and_goto_ptr(void);
+void tcg_gen_goto_ptr(TCGv_ptr tc_ptr);
 
 void tcg_gen_plugin_cb(unsigned from);
 void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);

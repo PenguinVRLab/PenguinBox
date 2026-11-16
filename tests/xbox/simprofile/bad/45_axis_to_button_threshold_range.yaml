@@ -1,0 +1,9 @@
+# BAD fixture (S-74): bindings_sbc_pedal_fire.yaml with one change: threshold -0.5 on a unipolar pedal (it never goes below 0). Load the good set with this file IN PLACE OF
+# bindings_sbc_pedal_fire.yaml; it must be refused with the code in MANIFEST.tsv.
+schema: sim-profile/1
+kind: bindings
+id: sbc_pedal_fire
+device: sbc_wire
+target: steel_battalion
+bind:
+  - { source: left_pedal, target: main_weapon, threshold: -0.5, hysteresis: 0.25 }

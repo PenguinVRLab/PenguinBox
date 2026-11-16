@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * Copyright (c) 2026 Patrick Carey
  *
  * This library is free software; you can redistribute it and/or

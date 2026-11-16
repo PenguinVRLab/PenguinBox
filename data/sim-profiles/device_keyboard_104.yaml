@@ -1,0 +1,120 @@
+# A standard ANSI 104-key keyboard as a device (work/0019). Every input is a `button` whose `scancode` is its Linux
+# evdev key code (the `code` of an EV_KEY event, as evtest prints it). Each code is cited to
+# /usr/include/linux/input-event-codes.h (the Linux 5.14 UAPI header on the dev box, read 2026-10-09) by KEY_ name
+# and line; the same values are in the kernel source, include/uapi/linux/input-event-codes.h. The codes are the
+# kernel's fixed ABI, the same on every Linux machine; the line numbers are this header's.
+# Ids are the KEY_ names in lower case. Art: devices/art/keyboard_104.svg, an original schematic generated from
+# the same key-layout table; anchors are key centres, and each keycap is a rect with id `key_<name>` in the art
+# (the canvas draws every key as a region from those bounds). A non-US layout prints other legends on some keys;
+# the codes (positions) are the same.
+schema: sim-profile/1
+kind: device
+id: keyboard_104
+name: "Keyboard (104-key)"
+source: keyboard
+art: devices/art/keyboard_104.svg
+inputs:
+  - { id: key_esc, kind: button, scancode: 1, anchor: [40, 40], label: "Esc" }  # KEY_ESC input-event-codes.h:76
+  - { id: key_f1, kind: button, scancode: 59, anchor: [120, 40], label: "F1" }  # KEY_F1 input-event-codes.h:134
+  - { id: key_f2, kind: button, scancode: 60, anchor: [160, 40], label: "F2" }  # KEY_F2 input-event-codes.h:135
+  - { id: key_f3, kind: button, scancode: 61, anchor: [200, 40], label: "F3" }  # KEY_F3 input-event-codes.h:136
+  - { id: key_f4, kind: button, scancode: 62, anchor: [240, 40], label: "F4" }  # KEY_F4 input-event-codes.h:137
+  - { id: key_f5, kind: button, scancode: 63, anchor: [300, 40], label: "F5" }  # KEY_F5 input-event-codes.h:138
+  - { id: key_f6, kind: button, scancode: 64, anchor: [340, 40], label: "F6" }  # KEY_F6 input-event-codes.h:139
+  - { id: key_f7, kind: button, scancode: 65, anchor: [380, 40], label: "F7" }  # KEY_F7 input-event-codes.h:140
+  - { id: key_f8, kind: button, scancode: 66, anchor: [420, 40], label: "F8" }  # KEY_F8 input-event-codes.h:141
+  - { id: key_f9, kind: button, scancode: 67, anchor: [480, 40], label: "F9" }  # KEY_F9 input-event-codes.h:142
+  - { id: key_f10, kind: button, scancode: 68, anchor: [520, 40], label: "F10" }  # KEY_F10 input-event-codes.h:143
+  - { id: key_f11, kind: button, scancode: 87, anchor: [560, 40], label: "F11" }  # KEY_F11 input-event-codes.h:162
+  - { id: key_f12, kind: button, scancode: 88, anchor: [600, 40], label: "F12" }  # KEY_F12 input-event-codes.h:163
+  - { id: key_sysrq, kind: button, scancode: 99, anchor: [650, 40], label: "Print Screen" }  # KEY_SYSRQ input-event-codes.h:174
+  - { id: key_scrolllock, kind: button, scancode: 70, anchor: [690, 40], label: "Scroll Lock" }  # KEY_SCROLLLOCK input-event-codes.h:145
+  - { id: key_pause, kind: button, scancode: 119, anchor: [730, 40], label: "Pause" }  # KEY_PAUSE input-event-codes.h:194
+  - { id: key_grave, kind: button, scancode: 41, anchor: [40, 100], label: "`" }  # KEY_GRAVE input-event-codes.h:116
+  - { id: key_1, kind: button, scancode: 2, anchor: [80, 100], label: "1" }  # KEY_1 input-event-codes.h:77
+  - { id: key_2, kind: button, scancode: 3, anchor: [120, 100], label: "2" }  # KEY_2 input-event-codes.h:78
+  - { id: key_3, kind: button, scancode: 4, anchor: [160, 100], label: "3" }  # KEY_3 input-event-codes.h:79
+  - { id: key_4, kind: button, scancode: 5, anchor: [200, 100], label: "4" }  # KEY_4 input-event-codes.h:80
+  - { id: key_5, kind: button, scancode: 6, anchor: [240, 100], label: "5" }  # KEY_5 input-event-codes.h:81
+  - { id: key_6, kind: button, scancode: 7, anchor: [280, 100], label: "6" }  # KEY_6 input-event-codes.h:82
+  - { id: key_7, kind: button, scancode: 8, anchor: [320, 100], label: "7" }  # KEY_7 input-event-codes.h:83
+  - { id: key_8, kind: button, scancode: 9, anchor: [360, 100], label: "8" }  # KEY_8 input-event-codes.h:84
+  - { id: key_9, kind: button, scancode: 10, anchor: [400, 100], label: "9" }  # KEY_9 input-event-codes.h:85
+  - { id: key_0, kind: button, scancode: 11, anchor: [440, 100], label: "0" }  # KEY_0 input-event-codes.h:86
+  - { id: key_minus, kind: button, scancode: 12, anchor: [480, 100], label: "-" }  # KEY_MINUS input-event-codes.h:87
+  - { id: key_equal, kind: button, scancode: 13, anchor: [520, 100], label: "=" }  # KEY_EQUAL input-event-codes.h:88
+  - { id: key_backspace, kind: button, scancode: 14, anchor: [580, 100], label: "Backspace" }  # KEY_BACKSPACE input-event-codes.h:89
+  - { id: key_insert, kind: button, scancode: 110, anchor: [650, 100], label: "Insert" }  # KEY_INSERT input-event-codes.h:185
+  - { id: key_home, kind: button, scancode: 102, anchor: [690, 100], label: "Home" }  # KEY_HOME input-event-codes.h:177
+  - { id: key_pageup, kind: button, scancode: 104, anchor: [730, 100], label: "Page Up" }  # KEY_PAGEUP input-event-codes.h:179
+  - { id: key_numlock, kind: button, scancode: 69, anchor: [780, 100], label: "Num Lock" }  # KEY_NUMLOCK input-event-codes.h:144
+  - { id: key_kpslash, kind: button, scancode: 98, anchor: [820, 100], label: "Num /" }  # KEY_KPSLASH input-event-codes.h:173
+  - { id: key_kpasterisk, kind: button, scancode: 55, anchor: [860, 100], label: "Num *" }  # KEY_KPASTERISK input-event-codes.h:130
+  - { id: key_kpminus, kind: button, scancode: 74, anchor: [900, 100], label: "Num -" }  # KEY_KPMINUS input-event-codes.h:149
+  - { id: key_tab, kind: button, scancode: 15, anchor: [50, 140], label: "Tab" }  # KEY_TAB input-event-codes.h:90
+  - { id: key_q, kind: button, scancode: 16, anchor: [100, 140], label: "Q" }  # KEY_Q input-event-codes.h:91
+  - { id: key_w, kind: button, scancode: 17, anchor: [140, 140], label: "W" }  # KEY_W input-event-codes.h:92
+  - { id: key_e, kind: button, scancode: 18, anchor: [180, 140], label: "E" }  # KEY_E input-event-codes.h:93
+  - { id: key_r, kind: button, scancode: 19, anchor: [220, 140], label: "R" }  # KEY_R input-event-codes.h:94
+  - { id: key_t, kind: button, scancode: 20, anchor: [260, 140], label: "T" }  # KEY_T input-event-codes.h:95
+  - { id: key_y, kind: button, scancode: 21, anchor: [300, 140], label: "Y" }  # KEY_Y input-event-codes.h:96
+  - { id: key_u, kind: button, scancode: 22, anchor: [340, 140], label: "U" }  # KEY_U input-event-codes.h:97
+  - { id: key_i, kind: button, scancode: 23, anchor: [380, 140], label: "I" }  # KEY_I input-event-codes.h:98
+  - { id: key_o, kind: button, scancode: 24, anchor: [420, 140], label: "O" }  # KEY_O input-event-codes.h:99
+  - { id: key_p, kind: button, scancode: 25, anchor: [460, 140], label: "P" }  # KEY_P input-event-codes.h:100
+  - { id: key_leftbrace, kind: button, scancode: 26, anchor: [500, 140], label: "[" }  # KEY_LEFTBRACE input-event-codes.h:101
+  - { id: key_rightbrace, kind: button, scancode: 27, anchor: [540, 140], label: "]" }  # KEY_RIGHTBRACE input-event-codes.h:102
+  - { id: key_backslash, kind: button, scancode: 43, anchor: [590, 140], label: "\\" }  # KEY_BACKSLASH input-event-codes.h:118
+  - { id: key_delete, kind: button, scancode: 111, anchor: [650, 140], label: "Delete" }  # KEY_DELETE input-event-codes.h:186
+  - { id: key_end, kind: button, scancode: 107, anchor: [690, 140], label: "End" }  # KEY_END input-event-codes.h:182
+  - { id: key_pagedown, kind: button, scancode: 109, anchor: [730, 140], label: "Page Down" }  # KEY_PAGEDOWN input-event-codes.h:184
+  - { id: key_kp7, kind: button, scancode: 71, anchor: [780, 140], label: "Num 7" }  # KEY_KP7 input-event-codes.h:146
+  - { id: key_kp8, kind: button, scancode: 72, anchor: [820, 140], label: "Num 8" }  # KEY_KP8 input-event-codes.h:147
+  - { id: key_kp9, kind: button, scancode: 73, anchor: [860, 140], label: "Num 9" }  # KEY_KP9 input-event-codes.h:148
+  - { id: key_kpplus, kind: button, scancode: 78, anchor: [900, 160], label: "Num +" }  # KEY_KPPLUS input-event-codes.h:153
+  - { id: key_capslock, kind: button, scancode: 58, anchor: [55, 180], label: "Caps Lock" }  # KEY_CAPSLOCK input-event-codes.h:133
+  - { id: key_a, kind: button, scancode: 30, anchor: [110, 180], label: "A" }  # KEY_A input-event-codes.h:105
+  - { id: key_s, kind: button, scancode: 31, anchor: [150, 180], label: "S" }  # KEY_S input-event-codes.h:106
+  - { id: key_d, kind: button, scancode: 32, anchor: [190, 180], label: "D" }  # KEY_D input-event-codes.h:107
+  - { id: key_f, kind: button, scancode: 33, anchor: [230, 180], label: "F" }  # KEY_F input-event-codes.h:108
+  - { id: key_g, kind: button, scancode: 34, anchor: [270, 180], label: "G" }  # KEY_G input-event-codes.h:109
+  - { id: key_h, kind: button, scancode: 35, anchor: [310, 180], label: "H" }  # KEY_H input-event-codes.h:110
+  - { id: key_j, kind: button, scancode: 36, anchor: [350, 180], label: "J" }  # KEY_J input-event-codes.h:111
+  - { id: key_k, kind: button, scancode: 37, anchor: [390, 180], label: "K" }  # KEY_K input-event-codes.h:112
+  - { id: key_l, kind: button, scancode: 38, anchor: [430, 180], label: "L" }  # KEY_L input-event-codes.h:113
+  - { id: key_semicolon, kind: button, scancode: 39, anchor: [470, 180], label: ";" }  # KEY_SEMICOLON input-event-codes.h:114
+  - { id: key_apostrophe, kind: button, scancode: 40, anchor: [510, 180], label: "'" }  # KEY_APOSTROPHE input-event-codes.h:115
+  - { id: key_enter, kind: button, scancode: 28, anchor: [575, 180], label: "Enter" }  # KEY_ENTER input-event-codes.h:103
+  - { id: key_kp4, kind: button, scancode: 75, anchor: [780, 180], label: "Num 4" }  # KEY_KP4 input-event-codes.h:150
+  - { id: key_kp5, kind: button, scancode: 76, anchor: [820, 180], label: "Num 5" }  # KEY_KP5 input-event-codes.h:151
+  - { id: key_kp6, kind: button, scancode: 77, anchor: [860, 180], label: "Num 6" }  # KEY_KP6 input-event-codes.h:152
+  - { id: key_leftshift, kind: button, scancode: 42, anchor: [65, 220], label: "Left Shift" }  # KEY_LEFTSHIFT input-event-codes.h:117
+  - { id: key_z, kind: button, scancode: 44, anchor: [130, 220], label: "Z" }  # KEY_Z input-event-codes.h:119
+  - { id: key_x, kind: button, scancode: 45, anchor: [170, 220], label: "X" }  # KEY_X input-event-codes.h:120
+  - { id: key_c, kind: button, scancode: 46, anchor: [210, 220], label: "C" }  # KEY_C input-event-codes.h:121
+  - { id: key_v, kind: button, scancode: 47, anchor: [250, 220], label: "V" }  # KEY_V input-event-codes.h:122
+  - { id: key_b, kind: button, scancode: 48, anchor: [290, 220], label: "B" }  # KEY_B input-event-codes.h:123
+  - { id: key_n, kind: button, scancode: 49, anchor: [330, 220], label: "N" }  # KEY_N input-event-codes.h:124
+  - { id: key_m, kind: button, scancode: 50, anchor: [370, 220], label: "M" }  # KEY_M input-event-codes.h:125
+  - { id: key_comma, kind: button, scancode: 51, anchor: [410, 220], label: "," }  # KEY_COMMA input-event-codes.h:126
+  - { id: key_dot, kind: button, scancode: 52, anchor: [450, 220], label: "." }  # KEY_DOT input-event-codes.h:127
+  - { id: key_slash, kind: button, scancode: 53, anchor: [490, 220], label: "/" }  # KEY_SLASH input-event-codes.h:128
+  - { id: key_rightshift, kind: button, scancode: 54, anchor: [565, 220], label: "Right Shift" }  # KEY_RIGHTSHIFT input-event-codes.h:129
+  - { id: key_up, kind: button, scancode: 103, anchor: [690, 220], label: "Up" }  # KEY_UP input-event-codes.h:178
+  - { id: key_kp1, kind: button, scancode: 79, anchor: [780, 220], label: "Num 1" }  # KEY_KP1 input-event-codes.h:154
+  - { id: key_kp2, kind: button, scancode: 80, anchor: [820, 220], label: "Num 2" }  # KEY_KP2 input-event-codes.h:155
+  - { id: key_kp3, kind: button, scancode: 81, anchor: [860, 220], label: "Num 3" }  # KEY_KP3 input-event-codes.h:156
+  - { id: key_kpenter, kind: button, scancode: 96, anchor: [900, 240], label: "Num Enter" }  # KEY_KPENTER input-event-codes.h:171
+  - { id: key_leftctrl, kind: button, scancode: 29, anchor: [45, 260], label: "Left Ctrl" }  # KEY_LEFTCTRL input-event-codes.h:104
+  - { id: key_leftmeta, kind: button, scancode: 125, anchor: [95, 260], label: "Left Super" }  # KEY_LEFTMETA input-event-codes.h:202
+  - { id: key_leftalt, kind: button, scancode: 56, anchor: [145, 260], label: "Left Alt" }  # KEY_LEFTALT input-event-codes.h:131
+  - { id: key_space, kind: button, scancode: 57, anchor: [295, 260], label: "Space" }  # KEY_SPACE input-event-codes.h:132
+  - { id: key_rightalt, kind: button, scancode: 100, anchor: [445, 260], label: "Right Alt" }  # KEY_RIGHTALT input-event-codes.h:175
+  - { id: key_rightmeta, kind: button, scancode: 126, anchor: [495, 260], label: "Right Super" }  # KEY_RIGHTMETA input-event-codes.h:203
+  - { id: key_compose, kind: button, scancode: 127, anchor: [545, 260], label: "Menu" }  # KEY_COMPOSE input-event-codes.h:204
+  - { id: key_rightctrl, kind: button, scancode: 97, anchor: [595, 260], label: "Right Ctrl" }  # KEY_RIGHTCTRL input-event-codes.h:172
+  - { id: key_left, kind: button, scancode: 105, anchor: [650, 260], label: "Left" }  # KEY_LEFT input-event-codes.h:180
+  - { id: key_down, kind: button, scancode: 108, anchor: [690, 260], label: "Down" }  # KEY_DOWN input-event-codes.h:183
+  - { id: key_right, kind: button, scancode: 106, anchor: [730, 260], label: "Right" }  # KEY_RIGHT input-event-codes.h:181
+  - { id: key_kp0, kind: button, scancode: 82, anchor: [800, 260], label: "Num 0" }  # KEY_KP0 input-event-codes.h:157
+  - { id: key_kpdot, kind: button, scancode: 83, anchor: [860, 260], label: "Num ." }  # KEY_KPDOT input-event-codes.h:158

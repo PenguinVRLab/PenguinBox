@@ -81,3 +81,5 @@ public:
 };
 
 extern PopupMenuScene g_popup_menu;
+
+void SimBootDraw(void);

@@ -61,6 +61,7 @@ struct TranslationBlock {
 #define CF_NOIRQ         0x00010000
 #define CF_PCREL         0x00020000
 #define CF_BP_PAGE       0x00040000
+#define CF_STALE         0x00080000
 #define CF_CLUSTER_MASK  0xff000000
 #define CF_CLUSTER_SHIFT 24
 
@@ -141,5 +142,10 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
 
 void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
                               tb_page_addr_t last);
+
+#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
+TranslationBlock *tb_lazyval_lookup(CPUState *cpu, vaddr pc, uint64_t cs_base, uint32_t flags, uint32_t cflags,
+                                    tb_page_addr_t phys_pc, void *host_pc);
+#endif
 
 #endif

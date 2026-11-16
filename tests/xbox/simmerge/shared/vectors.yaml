@@ -1,0 +1,360 @@
+# The merge arithmetic, defined ONCE as golden vectors (docs/decisions.md O-47; work/0031).
+#
+# Source of the rules: xemu-vr-8d's XB-6 rules for PenguinBox's merge layer, under the owner's "go with your
+# recommendations" (relayed 2026-11-15; the owner's go covered the four headlines O-07 rounding, O-15 policies,
+# O-16 response, O-23 integrate, and the details are xemu-vr-8d's). The app's previews (profile/merge.py,
+# profile/relative.py, ui/axis_response.py) are tested against this file by tests/test_merge_vectors.py.
+# PenguinBox's merge-layer test (XB-6) vendors this file BY ITS SHA256; a change here is a new sha both sides take.
+#
+# The chain for one axis binding (kind axis / split):
+#   normalised  the source's raw value through Range.normalise, on the calibration's min/rest/max when one is given
+#               (it replaces the descriptor's); bipolar [-1, 1] (each side scaled on its own), unipolar [0, 1]
+#   shaped      O-16 on the source's own c or u: 1 binding invert (c -> -c, u -> 1 - u); 2 m = |c| or u, s its sign;
+#               3 L = max(window_lo, deadzone), m = clamp((m - L) / (window_hi - L), 0, 1); 4 m = min(m / saturation, 1);
+#               5 m = m ^ curve; 6 s * m. Defaults: window [0, 1], deadzone 0, saturation 1, curve 1, invert false.
+#   mapped      O-15 across polarity (equal to shaped when source and target agree). bipolar c -> unipolar u:
+#               half_positive max(c, 0); half_negative max(-c, 0); absolute |c|; full_range (c + 1) / 2;
+#               split: targets[0] max(c, 0), targets[1] max(-c, 0). unipolar u -> bipolar c: half_positive u;
+#               half_negative -u; full_range 2u - 1; absolute u.
+#   value       Range.denormalise on the target, continuous
+#   rounded     O-07: the nearest integer, halves away from the target's rest
+# kind integrate (O-23): p starts at the target's rest; a motion of d counts adds d * (max - min) / counts_per_travel,
+#   negated by invert; clamped to [min, max] with no wind-up; "recentre" sets p = rest; positions[i] and rounded[i]
+#   are p after steps[i], continuous and rounded (O-07).
+# kind round (O-07): value -> rounded on target.  kind sbc_byte (O-07, the merge layer's SBC aiming byte):
+#   axis = wire - 0x8000, byte = 128 + floor(axis / 256).
+#
+# Continuous fields compare within `tolerance` (absolute); rounded fields and bytes compare exactly. The arithmetic is
+# IEEE-754 DOUBLE throughout, in the order written above (a float32 port misses the tolerance, worst 1.95e-3). A
+# vector's continuous value sits on an exact half only where every step is exact in binary (e.g. (0.5 - 0.1) / 0.8 =
+# 0.5 exactly); (0.6 - 0.2) / 0.8 is 0.49999999999999994 in double, so no vector rounds a value like that.
+# `shaped` and `mapped` assume the response runs BEFORE the policy (XB-6's order, xemu-vr-8d's answer 1; half_positive
+# with invert gives max(-c, 0)). A vector's optional `source_invert: true` is the source descriptor's own invert
+# (answer 3): on c or u after normalising and clamping (the calibrated range when there is one), before the binding's
+# response; `normalised` is the value before that invert. normalise clamps bipolar c to [-1, 1] and unipolar u to
+# [0, 1] right after normalising (answer a), so a raw beyond the calibrated range gives exactly -1, +1, 0 or 1.
+# A policy between two ranges of the SAME polarity is ignored (answer 7); `split` applies always: from a bipolar c
+# targets[0] gets max(c, 0) and targets[1] max(-c, 0), from a unipolar u targets[0] gets the shaped u and targets[1]
+# 0, and a bipolar target uses rest..max only (answer 2). Rounding v >= rest ? floor(v + 0.5) : ceil(v - 0.5)
+# (answer 6): a value exactly at a half-integer rest goes up (rest 2.5, v 2.5 -> 3).
+# Source of the follow-up rules: xemu-vr-8d's answers 1-7 and a-c, details under the owner's go, 2026-11-15.
+# Left out on purpose: deadzone outside [0, window_hi), saturation outside (0, 1] and curve <= 0 (the validator refuses
+# all three in both apps, S-71, the owner's "go with a", 2026-11-15: RESPONSE_DEADZONE, RESPONSE_SATURATION,
+# RESPONSE_CURVE, with shared bad fixtures 35-37; no vector); XB-6's end-to-end check compares only value and rounded.
+#
+# ---- S-74 (2026-11-15): a BUTTON bound to an AXIS and an AXIS bound to a BUTTON, time-stepped.
+# The owner ruled the behaviour (decisions.md S-74: spring-back "go to X% while held", stay-put "move at a rate while
+# held", optional ramp, two keys on one axis "last pressed wins", axis -> button with threshold and hysteresis). The
+# exact rules below (field units, the step rule, the ramp's slope, arbitration mid-ramp) are the app lane's PROPOSAL,
+# not yet ruled: see S-74's open items. The expected values were computed in exact rational arithmetic from this text
+# (not from profile/merge.py), then checked against merge.py's doubles.
+# kind button_axis: every button -> axis binding on ONE target control, keyed by name in `bindings`.
+#   returns_to_rest true (spring-back, the target file's default): each binding has `value`, the canonical position
+#     while its key is held (bipolar -1..1, unipolar 0..1, 0 = rest), and an optional `ramp: { press_ms, release_ms }`
+#     (absent or 0 = instant). The state y is canonical, starting at 0 (rest); the output is denormalise(y).
+#     The driver (below) sets the goal: its `value`; with no key held the goal is 0 (rest). y moves toward the goal in a
+#     straight line at |value| / press_ms per ms of the binding that drives (going to a held key's value) or at
+#     |value| / release_ms of the binding that drove last (going back to rest), computed as dt_ms * |value| / ms; it
+#     stops at the goal. A ms of 0 jumps to the goal.
+#   returns_to_rest false (stay-put, e.g. the SBC aiming lever): each binding has `rate`, full travels (min to max) per
+#     second, signed: + toward max ("full travel in N s" is rate 1/N). The state p is raw, starting at the target's
+#     rest; while a key drives, p += rate * dt_ms * (max - min) / 1000 (in that order), clamped to [min, max] with no
+#     wind-up; with none held p stays where it is. No `value`, no `ramp`.
+#   Last pressed wins: the held keys are kept in press order; the most recently pressed one drives; when it is released
+#     the most recent one still held takes over; none held: back to rest (spring-back) or stays (stay-put).
+#   The step rule: each step is { dt_ms, held }. First time advances by dt_ms with the keys as they were (the previous
+#     step's `held`), piecewise linear; then the keys are read: keys no longer listed are released, newly listed keys
+#     are pressed in BINDING order: keys first seen pressed in the same step join in the order of their bindings
+#     (the `bindings` mapping's order in this file; the later binding counts as pressed later; the owner, 2026-11-15:
+#     "binding order", what an emulator that polls its keys can see); then a 0 ms ramp jumps at once.
+#     values[i] and rounded[i] are the output after step i (continuous, then rounded as O-07). Before step 0 no key is
+#     held and the output is at rest.
+# kind axis_button: one axis bound to a digital button. o = the source's normalised c or u (clamped), through the
+#   binding's `invert` when set (c -> -c, u -> 1 - u). `threshold` is canonical and its sign picks the direction:
+#   threshold > 0: released -> pressed when o >= threshold; pressed -> released when o < threshold - hysteresis.
+#   threshold < 0 mirrors it: pressed when o <= threshold; released when o > threshold + hysteresis. The button
+#   starts released; pressed[i] is the state after raws[i]. Every edge in these vectors is exact in binary.
+#
+# ---- S-75 (2026-11-15): the owner's two rulings on the S-74 bindings, both what PenguinBox's XB-6 already does.
+# "go with yes" (decisions.md S-75): kind axis_button takes the source descriptor's own invert. A vector's optional
+#   `source_invert: true` flips o first (c -> -c, u -> 1 - u, on the normalised, clamped value, as in the axis chain),
+#   then the binding's `invert`; both set cancel. The threshold and hysteresis then act on that o, as above.
+# "I want you to do one shared position" (S-75): kind stay_put is ONE stay-put target control and the ONE position p
+#   that every rate key (`rates`, as button_axis's stay-put bindings) and every integrate (mouse) binding on it moves.
+#   The in-update order is XB-6's rules as implemented (xemu-vr-8d, relayed 2026-11-15), under the owner's go:
+#   p starts at the target's rest. One step { dt_ms, counts, held } goes:
+#   1 rate: the key that was driving BEFORE this step (the last pressed, the previous step's `held`) adds
+#     p += rate * dt_ms * (max - min) / 1000, clamped to [min, max] (no wind-up); none held: no change;
+#   2 integrate, the bindings in `integrates` list order (= document order): one with counts in this step's `counts`
+#     adds p += counts * (max - min) / counts_per_travel, negated when exactly one of its `invert` and `source_invert`
+#     (the device descriptor's) is set (both set cancel), clamped after EACH binding;
+#   3 right after a binding's own counts, if its `recentre` button is in this step's `held`, p = rest: it wins over this
+#     step's rate and that binding's motion, and a later binding in the list still adds its counts from rest;
+#   4 the keys are read: rate keys not in `held` leave the press order, newly pressed ones join it in binding order
+#     (as above). Reading keys does not move p.
+#   values[i] and rounded[i] are p after step i, continuous and rounded (O-07, halves away from rest). Expected values
+#   were computed in exact rational arithmetic from this text, not from profile/merge.py.
+format: 1
+tolerance: 1.0e-6
+
+ranges:   # named here for reading only; every vector spells its ranges out
+  steering: { min: -32768, rest: 0, max: 32767 }      # a bipolar wheel / the Duke's sticks
+  stick:    { min: -32768, rest: 0, max: 32767 }
+  trigger:  { min: 0, rest: 0, max: 255 }             # the Duke's analog triggers
+  pedal:    { min: 0, rest: 0, max: 1000 }
+  accel:    { min: -32768, rest: -32768, max: 32767 } # a unipolar pedal reported on a signed axis
+  aiming:   { min: 0, rest: 32768, max: 65535 }       # the SBC's aiming lever (wire units)
+
+vectors:
+  # ---- O-15: bipolar -> unipolar, identity response
+  - { id: b2u-half_positive-worked, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_positive }, target: { min: 0, rest: 0, max: 255 }, raw: 16384,
+      expect: { normalised: 0.500015259, shaped: 0.500015259, mapped: 0.500015259, value: 127.503891110, rounded: 128 } }
+  - { id: b2u-half_positive-negative-side, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_positive }, target: { min: 0, rest: 0, max: 255 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: 0.0, value: 0.0, rounded: 0 } }
+  - { id: b2u-half_negative, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_negative }, target: { min: 0, rest: 0, max: 255 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: b2u-half_negative-positive-side, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_negative }, target: { min: 0, rest: 0, max: 255 }, raw: 16384,
+      expect: { normalised: 0.500015259, shaped: 0.500015259, mapped: 0.0, value: 0.0, rounded: 0 } }
+  - { id: b2u-absolute-negative, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: absolute }, target: { min: 0, rest: 0, max: 255 }, raw: -8192,
+      expect: { normalised: -0.25, shaped: -0.25, mapped: 0.25, value: 63.75, rounded: 64 } }
+  - { id: b2u-absolute-positive, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: absolute }, target: { min: 0, rest: 0, max: 255 }, raw: 16384,
+      expect: { normalised: 0.500015259, shaped: 0.500015259, mapped: 0.500015259, value: 127.503891110, rounded: 128 } }
+  - { id: b2u-full_range-worked, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: full_range }, target: { min: 0, rest: 0, max: 255 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: 0.25, value: 63.75, rounded: 64 } }
+  - { id: b2u-full_range-at-rest-worked, rule: O-15+O-07, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: full_range }, target: { min: 0, rest: 0, max: 255 }, raw: 0,
+      expect: { normalised: 0.0, shaped: 0.0, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: b2u-full_range-max, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: full_range }, target: { min: 0, rest: 0, max: 255 }, raw: 32767,
+      expect: { normalised: 1.0, shaped: 1.0, mapped: 1.0, value: 255.0, rounded: 255 } }
+  - { id: b2u-full_range-min, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: full_range }, target: { min: 0, rest: 0, max: 255 }, raw: -32768,
+      expect: { normalised: -1.0, shaped: -1.0, mapped: 0.0, value: 0.0, rounded: 0 } }
+  # ---- O-15: split, one bipolar source onto two unipolar targets
+  - { id: split-positive, rule: O-15, kind: split, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: split }, targets: [ { min: 0, rest: 0, max: 255 }, { min: 0, rest: 0, max: 255 } ], raw: 16384,
+      expect: { normalised: 0.500015259, shaped: 0.500015259, mapped: [ 0.500015259, 0.0 ], value: [ 127.503891110, 0.0 ], rounded: [ 128, 0 ] } }
+  - { id: split-negative, rule: O-15, kind: split, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: split }, targets: [ { min: 0, rest: 0, max: 255 }, { min: 0, rest: 0, max: 255 } ], raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: [ 0.0, 0.5 ], value: [ 0.0, 127.5 ], rounded: [ 0, 128 ] } }
+  - { id: split-unequal-targets, rule: O-15, kind: split, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: split }, targets: [ { min: 0, rest: 0, max: 255 }, { min: 0, rest: 0, max: 1000 } ], raw: -8192,
+      expect: { normalised: -0.25, shaped: -0.25, mapped: [ 0.0, 0.25 ], value: [ 0.0, 250.0 ], rounded: [ 0, 250 ] } }
+  # ---- O-15: unipolar -> bipolar, identity response
+  - { id: u2b-half_positive, rule: O-15+O-07, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: half_positive }, target: { min: -32768, rest: 0, max: 32767 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 16383.5, rounded: 16384 } }
+  - { id: u2b-half_negative, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: half_negative }, target: { min: -32768, rest: 0, max: 32767 }, raw: 250,
+      expect: { normalised: 0.25, shaped: 0.25, mapped: -0.25, value: -8192.0, rounded: -8192 } }
+  - { id: u2b-absolute, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: absolute }, target: { min: -32768, rest: 0, max: 32767 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 16383.5, rounded: 16384 } }
+  - { id: u2b-full_range-mid, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: full_range }, target: { min: -32768, rest: 0, max: 32767 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.0, value: 0.0, rounded: 0 } }
+  - { id: u2b-full_range-low, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: full_range }, target: { min: -32768, rest: 0, max: 32767 }, raw: 250,
+      expect: { normalised: 0.25, shaped: 0.25, mapped: -0.5, value: -16384.0, rounded: -16384 } }
+  - { id: u2b-full_range-high, rule: O-15+O-07, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: full_range }, target: { min: -32768, rest: 0, max: 32767 }, raw: 750,
+      expect: { normalised: 0.75, shaped: 0.75, mapped: 0.5, value: 16383.5, rounded: 16384 } }
+  - { id: u2b-full_range-ends, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: full_range }, target: { min: -32768, rest: 0, max: 32767 }, raw: 0,
+      expect: { normalised: 0.0, shaped: 0.0, mapped: -1.0, value: -32768.0, rounded: -32768 } }
+  - { id: u2b-full_range-accel-just-below-half, rule: O-15+O-07, kind: axis, source: { min: -32768, rest: -32768, max: 32767 }, binding: { policy: full_range }, target: { min: -32768, rest: 0, max: 32767 }, raw: 0,
+      expect: { normalised: 0.500007630, shaped: 0.500007630, mapped: 0.000015259, value: 0.499992370, rounded: 0 } }
+  # ---- O-15 with response shaping, only where the order of O-16 and O-15 cannot change the number
+  - { id: b2u-half_positive-deadzone, rule: O-15+O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_positive, deadzone: 0.1 }, target: { min: 0, rest: 0, max: 255 }, raw: 16384,
+      expect: { normalised: 0.500015259, shaped: 0.444461399, mapped: 0.444461399, value: 113.337656789, rounded: 113 } }
+  - { id: b2u-half_negative-curve, rule: O-15+O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_negative, curve: 2 }, target: { min: 0, rest: 0, max: 255 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.25, mapped: 0.25, value: 63.75, rounded: 64 } }
+  - { id: b2u-absolute-saturation, rule: O-15+O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: absolute, saturation: 0.5 }, target: { min: 0, rest: 0, max: 255 }, raw: -8192,
+      expect: { normalised: -0.25, shaped: -0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: u2b-half_negative-window, rule: O-15+O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: half_negative, window: [ 0.1, 0.9 ] }, target: { min: -32768, rest: 0, max: 32767 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: -0.5, value: -16384.0, rounded: -16384 } }
+  - { id: split-window, rule: O-15+O-16, kind: split, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: split, window: [ 0.1, 0.9 ] }, targets: [ { min: 0, rest: 0, max: 255 }, { min: 0, rest: 0, max: 255 } ], raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: [ 0.0, 0.5 ], value: [ 0.0, 127.5 ], rounded: [ 0, 128 ] } }
+  # ---- O-16: the response chain, same polarity (no policy)
+  - { id: resp-window-mid-worked, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { window: [ 0.1, 0.9 ] }, target: { min: 0, rest: 0, max: 255 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: resp-window-below-worked, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { window: [ 0.1, 0.9 ] }, target: { min: 0, rest: 0, max: 255 }, raw: 50,
+      expect: { normalised: 0.05, shaped: 0.0, mapped: 0.0, value: 0.0, rounded: 0 } }
+  - { id: resp-window-above-worked, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { window: [ 0.1, 0.9 ] }, target: { min: 0, rest: 0, max: 255 }, raw: 950,
+      expect: { normalised: 0.95, shaped: 1.0, mapped: 1.0, value: 255.0, rounded: 255 } }
+  - { id: resp-curve-worked, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { window: [ 0.1, 0.9 ], curve: 2 }, target: { min: 0, rest: 0, max: 255 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.25, mapped: 0.25, value: 63.75, rounded: 64 } }
+  - { id: resp-deadzone-over-window-lo, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { window: [ 0.1, 1.0 ], deadzone: 0.2 }, target: { min: 0, rest: 0, max: 255 }, raw: 700,
+      expect: { normalised: 0.7, shaped: 0.625, mapped: 0.625, value: 159.375, rounded: 159 } }
+  - { id: resp-deadzone-inside, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { deadzone: 0.2 }, target: { min: 0, rest: 0, max: 255 }, raw: 150,
+      expect: { normalised: 0.15, shaped: 0.0, mapped: 0.0, value: 0.0, rounded: 0 } }
+  - { id: resp-saturation, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { saturation: 0.8 }, target: { min: 0, rest: 0, max: 255 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.625, mapped: 0.625, value: 159.375, rounded: 159 } }
+  - { id: resp-saturation-clips, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { saturation: 0.8 }, target: { min: 0, rest: 0, max: 255 }, raw: 900,
+      expect: { normalised: 0.9, shaped: 1.0, mapped: 1.0, value: 255.0, rounded: 255 } }
+  - { id: resp-saturation-before-curve, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { saturation: 0.5, curve: 2 }, target: { min: 0, rest: 0, max: 255 }, raw: 400,
+      expect: { normalised: 0.4, shaped: 0.64, mapped: 0.64, value: 163.2, rounded: 163 } }
+  - { id: resp-invert-unipolar, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { invert: true }, target: { min: 0, rest: 0, max: 255 }, raw: 0,
+      expect: { normalised: 0.0, shaped: 1.0, mapped: 1.0, value: 255.0, rounded: 255 } }
+  - { id: resp-invert-unipolar-before-window, rule: O-16, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { invert: true, window: [ 0.1, 0.9 ] }, target: { min: 0, rest: 0, max: 255 }, raw: 300,
+      expect: { normalised: 0.3, shaped: 0.75, mapped: 0.75, value: 191.25, rounded: 191 } }
+  - { id: resp-invert-bipolar, rule: O-16+O-07, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { invert: true }, target: { min: -32768, rest: 0, max: 32767 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: 0.5, mapped: 0.5, value: 16383.5, rounded: 16384 } }
+  - { id: resp-bipolar-window-keeps-sign, rule: O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { window: [ 0.1, 0.9 ] }, target: { min: -32768, rest: 0, max: 32767 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: -0.5, value: -16384.0, rounded: -16384 } }
+  - { id: resp-bipolar-curve-on-magnitude, rule: O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { curve: 2 }, target: { min: -32768, rest: 0, max: 32767 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.25, mapped: -0.25, value: -8192.0, rounded: -8192 } }
+  - { id: resp-identity, rule: O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: 1234,
+      expect: { normalised: 0.037659841, shaped: 0.037659841, mapped: 0.037659841, value: 1234.0, rounded: 1234 } }
+  # ---- calibration replaces the descriptor's min/rest/max
+  - { id: cal-bipolar-positive, rule: NORMALISE, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, calibration: { min: -30000, rest: 500, max: 31000 }, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: 15750,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 16383.5, rounded: 16384 } }
+  - { id: cal-bipolar-negative, rule: NORMALISE, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, calibration: { min: -30000, rest: 500, max: 31000 }, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: -14750,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: -0.5, value: -16384.0, rounded: -16384 } }
+  - { id: cal-unipolar, rule: NORMALISE, kind: axis, source: { min: 0, rest: 0, max: 1023 }, calibration: { min: 40, rest: 40, max: 980 }, binding: {}, target: { min: 0, rest: 0, max: 255 }, raw: 510,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  # ---- O-07: rounding to the nearest integer, halves away from rest
+  - { id: round-half-up-above-rest, rule: O-07, kind: round, target: { min: 0, rest: 0, max: 255 }, value: 127.5, rounded: 128 }
+  - { id: round-below-half, rule: O-07, kind: round, target: { min: 0, rest: 0, max: 255 }, value: 127.4999, rounded: 127 }
+  - { id: round-half-down-below-rest, rule: O-07, kind: round, target: { min: -32768, rest: 0, max: 32767 }, value: -0.5, rounded: -1 }
+  - { id: round-half-above-zero-rest, rule: O-07, kind: round, target: { min: -32768, rest: 0, max: 32767 }, value: 0.5, rounded: 1 }
+  - { id: round-negative-half, rule: O-07, kind: round, target: { min: -32768, rest: 0, max: 32767 }, value: -16383.5, rounded: -16384 }
+  - { id: round-half-below-mid-rest, rule: O-07, kind: round, target: { min: 0, rest: 32768, max: 65535 }, value: 32767.5, rounded: 32767 }
+  - { id: round-half-above-mid-rest, rule: O-07, kind: round, target: { min: 0, rest: 32768, max: 65535 }, value: 32768.5, rounded: 32769 }
+  - { id: round-half-rest-at-max, rule: O-07, kind: round, target: { min: 0, rest: 255, max: 255 }, value: 127.5, rounded: 127 }
+  - { id: round-exact-rest, rule: O-07, kind: round, target: { min: 0, rest: 32768, max: 65535 }, value: 32768.0, rounded: 32768 }
+  # ---- O-07: the SBC aiming byte, in the merge layer only
+  - { id: sbc-byte-worked, rule: O-07, kind: sbc_byte, wire: 0x7F01, axis: -255, byte: 127 }
+  - { id: sbc-byte-centre, rule: O-07, kind: sbc_byte, wire: 0x8000, axis: 0, byte: 128 }
+  - { id: sbc-byte-just-above-centre, rule: O-07, kind: sbc_byte, wire: 0x80FF, axis: 255, byte: 128 }
+  - { id: sbc-byte-min, rule: O-07, kind: sbc_byte, wire: 0x0000, axis: -32768, byte: 0 }
+  - { id: sbc-byte-max, rule: O-07, kind: sbc_byte, wire: 0xFFFF, axis: 32767, byte: 255 }
+  - { id: sbc-byte-floor-not-truncation, rule: O-07, kind: sbc_byte, wire: 0x7FFF, axis: -1, byte: 127 }
+  - { id: sbc-byte-high, rule: O-07, kind: sbc_byte, wire: 0xFF00, axis: 32512, byte: 255 }
+  # ---- O-23: integrate (mouse motion onto the SBC aiming lever)
+  - { id: integrate-move-worked, rule: O-23, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000 }, steps: [ 100 ],
+      expect: { positions: [ 36044.75 ], rounded: [ 36045 ] } }
+  - { id: integrate-clamp-then-back-worked, rule: O-23, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000 }, steps: [ 2000, -1 ],
+      expect: { positions: [ 65535.0, 65502.2325 ], rounded: [ 65535, 65502 ] } }
+  - { id: integrate-no-wind-up, rule: O-23+O-07, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000 }, steps: [ 4000, -1000 ],
+      expect: { positions: [ 65535.0, 32767.5 ], rounded: [ 65535, 32767 ] } }
+  - { id: integrate-clamp-low, rule: O-23, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000 }, steps: [ -3000, 1 ],
+      expect: { positions: [ 0.0, 32.7675 ], rounded: [ 0, 33 ] } }
+  - { id: integrate-recentre, rule: O-23, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000 }, steps: [ 500, recentre, -100 ],
+      expect: { positions: [ 49151.75, 32768.0, 29491.25 ], rounded: [ 49152, 32768, 29491 ] } }
+  - { id: integrate-invert, rule: O-23, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000, invert: true }, steps: [ 100 ],
+      expect: { positions: [ 29491.25 ], rounded: [ 29491 ] } }
+  - { id: integrate-no-motion, rule: O-23, kind: integrate, target: { min: 0, rest: 32768, max: 65535 }, binding: { counts_per_travel: 2000 }, steps: [ 0 ],
+      expect: { positions: [ 32768.0 ], rounded: [ 32768 ] } }
+  # ---- follow-up (xemu-vr-8d's answers 1, 2, 3, 6, 7 and the normalise clamp, 2026-11-15)
+  # answer 1: the response runs first, then the policy; half_positive with invert gives max(-c, 0)
+  - { id: b2u-half_positive-invert-negative-input, rule: O-16+O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_positive, invert: true }, target: { min: 0, rest: 0, max: 255 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: 0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: b2u-half_positive-invert-positive-input, rule: O-16+O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_positive, invert: true }, target: { min: 0, rest: 0, max: 255 }, raw: 16384,
+      expect: { normalised: 0.500015259, shaped: -0.500015259, mapped: 0.0, value: 0.0, rounded: 0 } }
+  # answer 2: split from a unipolar source (the first target gets the shaped u, the second 0); split onto a bipolar target (rest..max only)
+  - { id: split-from-unipolar, rule: O-15, kind: split, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: split }, targets: [ { min: 0, rest: 0, max: 255 }, { min: 0, rest: 0, max: 255 } ], raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: [ 0.5, 0.0 ], value: [ 127.5, 0.0 ], rounded: [ 128, 0 ] } }
+  - { id: split-from-unipolar-onto-bipolar, rule: O-15, kind: split, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: split }, targets: [ { min: -32768, rest: 0, max: 32767 }, { min: -32768, rest: 0, max: 32767 } ], raw: 250,
+      expect: { normalised: 0.25, shaped: 0.25, mapped: [ 0.25, 0.0 ], value: [ 8191.75, 0.0 ], rounded: [ 8192, 0 ] } }
+  - { id: split-onto-bipolar-second-target, rule: O-15, kind: split, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: split }, targets: [ { min: -32768, rest: 0, max: 32767 }, { min: -32768, rest: 0, max: 32767 } ], raw: -8192,
+      expect: { normalised: -0.25, shaped: -0.25, mapped: [ 0.0, 0.25 ], value: [ 0.0, 8191.75 ], rounded: [ 0, 8192 ] } }
+  - { id: split-onto-bipolar-first-target, rule: O-15, kind: split, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: split }, targets: [ { min: -32768, rest: 0, max: 32767 }, { min: -32768, rest: 0, max: 32767 } ], raw: 16384,
+      expect: { normalised: 0.500015259, shaped: 0.500015259, mapped: [ 0.500015259, 0.0 ], value: [ 16384.0, 0.0 ], rounded: [ 16384, 0 ] } }
+  # answer 3: the descriptor's own invert (source_invert) acts on c or u after normalising (the calibrated range when
+  # there is one) and before the binding's response; `normalised` is the value before that invert
+  - { id: descriptor-invert-bipolar, rule: O-47, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, source_invert: true, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: 16384,
+      expect: { normalised: 0.500015259, shaped: -0.500015259, mapped: -0.500015259, value: -16384.500015259, rounded: -16385 } }
+  - { id: descriptor-invert-unipolar, rule: O-47, kind: axis, source: { min: 0, rest: 0, max: 1000 }, source_invert: true, binding: {}, target: { min: 0, rest: 0, max: 255 }, raw: 250,
+      expect: { normalised: 0.25, shaped: 0.75, mapped: 0.75, value: 191.25, rounded: 191 } }
+  - { id: descriptor-invert-on-calibrated-c-not-raw, rule: O-47, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, calibration: { min: -30000, rest: 500, max: 31000 }, source_invert: true, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: 15750,
+      expect: { normalised: 0.5, shaped: -0.5, mapped: -0.5, value: -16384.0, rounded: -16384 } }
+  - { id: descriptor-invert-then-binding-invert-cancel, rule: O-47, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, source_invert: true, binding: { invert: true }, target: { min: -32768, rest: 0, max: 32767 }, raw: 15750,
+      expect: { normalised: 0.480666524, shaped: 0.480666524, mapped: 0.480666524, value: 15750.0, rounded: 15750 } }
+  - { id: descriptor-invert-before-the-bindings-policy, rule: O-47+O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, source_invert: true, binding: { policy: half_positive }, target: { min: 0, rest: 0, max: 255 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: 0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  # the normalise clamp: calibrated c in [-1, 1], u in [0, 1]
+  - { id: clamp-bipolar-below-calibrated-min, rule: NORMALISE, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, calibration: { min: -30000, rest: 500, max: 31000 }, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: -32768,
+      expect: { normalised: -1.0, shaped: -1.0, mapped: -1.0, value: -32768.0, rounded: -32768 } }
+  - { id: clamp-bipolar-above-calibrated-max, rule: NORMALISE, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, calibration: { min: -30000, rest: 500, max: 31000 }, binding: {}, target: { min: -32768, rest: 0, max: 32767 }, raw: 32767,
+      expect: { normalised: 1.0, shaped: 1.0, mapped: 1.0, value: 32767.0, rounded: 32767 } }
+  - { id: clamp-unipolar-below-calibrated-rest, rule: NORMALISE, kind: axis, source: { min: 0, rest: 0, max: 1023 }, calibration: { min: 40, rest: 40, max: 980 }, binding: {}, target: { min: 0, rest: 0, max: 255 }, raw: 0,
+      expect: { normalised: 0.0, shaped: 0.0, mapped: 0.0, value: 0.0, rounded: 0 } }
+  - { id: clamp-unipolar-above-calibrated-max, rule: NORMALISE, kind: axis, source: { min: 0, rest: 0, max: 1023 }, calibration: { min: 40, rest: 40, max: 980 }, binding: {}, target: { min: 0, rest: 0, max: 255 }, raw: 1023,
+      expect: { normalised: 1.0, shaped: 1.0, mapped: 1.0, value: 255.0, rounded: 255 } }
+  # answer 6: a half moves away from rest; a value exactly at a half-integer rest goes up
+  - { id: round-at-half-integer-rest, rule: O-07, kind: round, target: { min: 0, rest: 2.5, max: 5 }, value: 2.5, rounded: 3 }
+  - { id: round-half-below-half-integer-rest, rule: O-07, kind: round, target: { min: 0, rest: 2.5, max: 5 }, value: 1.5, rounded: 1 }
+  - { id: round-half-above-half-integer-rest, rule: O-07, kind: round, target: { min: 0, rest: 2.5, max: 5 }, value: 3.5, rounded: 4 }
+  - { id: round-just-below-half-integer-rest, rule: O-07, kind: round, target: { min: 0, rest: 2.5, max: 5 }, value: 2.4, rounded: 2 }
+  - { id: u2b-full_range-lands-on-half-integer-rest, rule: O-15+O-07, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: full_range }, target: { min: 0, rest: 2.5, max: 5 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.0, value: 2.5, rounded: 3 } }
+  # answer 7: a policy between two ranges of the same polarity is ignored (the value is as with no policy); split still applies
+  - { id: same-polarity-policy-ignored-unipolar, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: half_positive }, target: { min: 0, rest: 0, max: 255 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: same-polarity-policy-ignored-unipolar-full_range, rule: O-15, kind: axis, source: { min: 0, rest: 0, max: 1000 }, binding: { policy: full_range }, target: { min: 0, rest: 0, max: 255 }, raw: 500,
+      expect: { normalised: 0.5, shaped: 0.5, mapped: 0.5, value: 127.5, rounded: 128 } }
+  - { id: same-polarity-policy-ignored-bipolar, rule: O-15, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: absolute }, target: { min: -32768, rest: 0, max: 32767 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.5, mapped: -0.5, value: -16384.0, rounded: -16384 } }
+  - { id: same-polarity-policy-ignored-bipolar-half_negative-response, rule: O-15+O-16, kind: axis, source: { min: -32768, rest: 0, max: 32767 }, binding: { policy: half_negative, curve: 2 }, target: { min: -32768, rest: 0, max: 32767 }, raw: -16384,
+      expect: { normalised: -0.5, shaped: -0.25, mapped: -0.25, value: -8192.0, rounded: -8192 } }
+  # ---- S-74: button -> axis (spring-back, ramp, last pressed wins, stay-put) and axis -> button
+  - { id: b2a-spring-hold-release-worked, rule: S-74, kind: button_axis, target: { min: -32768, rest: 0, max: 32767 }, returns_to_rest: true, bindings: { k: { value: -0.5 } },
+      steps: [ { dt_ms: 0, held: [k] }, { dt_ms: 16, held: [k] }, { dt_ms: 16, held: [] }, { dt_ms: 16, held: [] } ],
+      expect: { values: [ -16384.0, -16384.0, 0.0, 0.0 ], rounded: [ -16384, -16384, 0, 0 ] } }
+  - { id: b2a-spring-full-unipolar, rule: S-74, kind: button_axis, target: { min: 0, rest: 0, max: 255 }, returns_to_rest: true, bindings: { k: { value: 1.0 } },
+      steps: [ { dt_ms: 0, held: [] }, { dt_ms: 10, held: [k] }, { dt_ms: 10, held: [] } ],
+      expect: { values: [ 0.0, 255.0, 0.0 ], rounded: [ 0, 255, 0 ] } }
+  - { id: b2a-spring-quarter-unipolar, rule: S-74, kind: button_axis, target: { min: 0, rest: 0, max: 255 }, returns_to_rest: true, bindings: { k: { value: 0.25 } },
+      steps: [ { dt_ms: 0, held: [k] }, { dt_ms: 5, held: [] } ],
+      expect: { values: [ 63.75, 0.0 ], rounded: [ 64, 0 ] } }
+  - { id: b2a-ramp-press-and-release-worked, rule: S-74, kind: button_axis, target: { min: 0, rest: 0, max: 255 }, returns_to_rest: true, bindings: { k: { value: 1.0, ramp: { press_ms: 200, release_ms: 100 } } },
+      steps: [ { dt_ms: 0, held: [k] }, { dt_ms: 50, held: [k] }, { dt_ms: 100, held: [k] }, { dt_ms: 100, held: [k] }, { dt_ms: 0, held: [] }, { dt_ms: 25, held: [] }, { dt_ms: 100, held: [] } ],
+      expect: { values: [ 0.0, 63.75, 191.25, 255.0, 255.0, 191.25, 0.0 ], rounded: [ 0, 64, 191, 255, 255, 191, 0 ] } }
+  - { id: b2a-ramp-release-mid-ramp, rule: S-74, kind: button_axis, target: { min: -32768, rest: 0, max: 32767 }, returns_to_rest: true, bindings: { k: { value: -1.0, ramp: { press_ms: 200, release_ms: 100 } } },
+      steps: [ { dt_ms: 0, held: [k] }, { dt_ms: 50, held: [] }, { dt_ms: 10, held: [] }, { dt_ms: 20, held: [] } ],
+      expect: { values: [ 0.0, -8192.0, -4915.2, 0.0 ], rounded: [ 0, -8192, -4915, 0 ] } }
+  - { id: b2a-ramp-press-only, rule: S-74, kind: button_axis, target: { min: 0, rest: 0, max: 255 }, returns_to_rest: true, bindings: { k: { value: 1.0, ramp: { press_ms: 100 } } },
+      steps: [ { dt_ms: 0, held: [k] }, { dt_ms: 25, held: [k] }, { dt_ms: 25, held: [] }, { dt_ms: 25, held: [] } ],
+      expect: { values: [ 0.0, 63.75, 0.0, 0.0 ], rounded: [ 0, 64, 0, 0 ] } }
+  - { id: b2a-last-pressed-wins-worked, rule: S-74, kind: button_axis, target: { min: -32768, rest: 0, max: 32767 }, returns_to_rest: true, bindings: { left: { value: -1.0 }, right: { value: 1.0 } },
+      steps: [ { dt_ms: 0, held: [left] }, { dt_ms: 16, held: [left, right] }, { dt_ms: 16, held: [left] }, { dt_ms: 16, held: [left, right] }, { dt_ms: 16, held: [right] }, { dt_ms: 16, held: [] } ],
+      expect: { values: [ -32768.0, 32767.0, -32768.0, 32767.0, 32767.0, 0.0 ], rounded: [ -32768, 32767, -32768, 32767, 32767, 0 ] } }
+  - { id: b2a-last-pressed-wins-same-step-binding-order, rule: S-74, kind: button_axis, target: { min: -32768, rest: 0, max: 32767 }, returns_to_rest: true, bindings: { left: { value: -0.25 }, right: { value: 0.75 } },
+      steps: [ { dt_ms: 0, held: [right, left] }, { dt_ms: 16, held: [right] }, { dt_ms: 16, held: [left, right] } ],
+      expect: { values: [ 24575.25, 24575.25, -8192.0 ], rounded: [ 24575, 24575, -8192 ] } }
+  - { id: b2a-last-pressed-wins-mid-ramp, rule: S-74, kind: button_axis, target: { min: -32768, rest: 0, max: 32767 }, returns_to_rest: true, bindings: { left: { value: -1.0, ramp: { press_ms: 100, release_ms: 100 } }, right: { value: 1.0, ramp: { press_ms: 100, release_ms: 50 } } },
+      steps: [ { dt_ms: 0, held: [right] }, { dt_ms: 25, held: [right, left] }, { dt_ms: 50, held: [right, left] }, { dt_ms: 50, held: [right] }, { dt_ms: 25, held: [] }, { dt_ms: 5, held: [] }, { dt_ms: 20, held: [] } ],
+      expect: { values: [ 0.0, 8191.75, -8192.0, -24576.0, -16384.0, -13107.2, 0.0 ], rounded: [ 0, 8192, -8192, -24576, -16384, -13107, 0 ] } }
+  - { id: b2a-stay-put-rate-worked, rule: S-74, kind: button_axis, target: { min: 0, rest: 32768, max: 65535 }, returns_to_rest: false, bindings: { up: { rate: 0.25 } },
+      steps: [ { dt_ms: 0, held: [up] }, { dt_ms: 100, held: [up] }, { dt_ms: 100, held: [] }, { dt_ms: 500, held: [] } ],
+      expect: { values: [ 32768.0, 34406.375, 36044.75, 36044.75 ], rounded: [ 32768, 34406, 36045, 36045 ] } }
+  - { id: b2a-stay-put-clamp-no-wind-up, rule: S-74, kind: button_axis, target: { min: 0, rest: 32768, max: 65535 }, returns_to_rest: false, bindings: { up: { rate: 1.0 }, down: { rate: -1.0 } },
+      steps: [ { dt_ms: 0, held: [up] }, { dt_ms: 2000, held: [up, down] }, { dt_ms: 10, held: [up, down] }, { dt_ms: 10, held: [] } ],
+      expect: { values: [ 32768.0, 65535.0, 64879.65, 64224.3 ], rounded: [ 32768, 65535, 64880, 64224 ] } }
+  - { id: b2a-stay-put-last-pressed-wins, rule: S-74, kind: button_axis, target: { min: 0, rest: 32768, max: 65535 }, returns_to_rest: false, bindings: { up: { rate: 0.25 }, down: { rate: -0.5 } },
+      steps: [ { dt_ms: 0, held: [up] }, { dt_ms: 40, held: [up, down] }, { dt_ms: 40, held: [up] }, { dt_ms: 40, held: [] }, { dt_ms: 1000, held: [] } ],
+      expect: { values: [ 32768.0, 33423.35, 32112.65, 32768.0, 32768.0 ], rounded: [ 32768, 33423, 32113, 32768, 32768 ] } }
+  - { id: b2a-stay-put-unipolar-clamp-low, rule: S-74, kind: button_axis, target: { min: 0, rest: 0, max: 255 }, returns_to_rest: false, bindings: { more: { rate: 0.5 }, less: { rate: -2.0 } },
+      steps: [ { dt_ms: 0, held: [more] }, { dt_ms: 100, held: [less] }, { dt_ms: 100, held: [] } ],
+      expect: { values: [ 0.0, 12.75, 0.0 ], rounded: [ 0, 13, 0 ] } }
+  - { id: a2b-positive-threshold-hysteresis-worked, rule: S-74, kind: axis_button, source: { min: 0, rest: 0, max: 1000 }, binding: { threshold: 0.5, hysteresis: 0.25 }, raws: [ 0, 499, 500, 300, 250, 249, 499, 500, 1000, 0 ],
+      expect: { pressed: [ false, false, true, true, true, false, false, true, true, false ] } }
+  - { id: a2b-negative-threshold-mirrors, rule: S-74, kind: axis_button, source: { min: -32768, rest: 0, max: 32767 }, binding: { threshold: -0.5, hysteresis: 0.25 }, raws: [ 0, -16383, -16384, -8192, -8191, 32767, -32768, 0 ],
+      expect: { pressed: [ false, false, true, true, false, false, true, false ] } }
+  - { id: a2b-hysteresis-zero, rule: S-74, kind: axis_button, source: { min: 0, rest: 0, max: 1000 }, binding: { threshold: 0.5, hysteresis: 0.0 }, raws: [ 500, 499, 500, 1000, 499 ],
+      expect: { pressed: [ true, false, true, true, false ] } }
+  - { id: a2b-bipolar-positive-side-only, rule: S-74, kind: axis_button, source: { min: -32768, rest: 0, max: 32767 }, binding: { threshold: 0.5, hysteresis: 1.0 }, raws: [ -32768, 32767, 0, -16383, -16384, -16385, 32767 ],
+      expect: { pressed: [ false, true, true, true, true, false, true ] } }
+  - { id: a2b-invert, rule: S-74, kind: axis_button, source: { min: 0, rest: 0, max: 1000 }, binding: { threshold: 0.75, hysteresis: 0.25, invert: true }, raws: [ 1000, 250, 0, 500, 501, 250 ],
+      expect: { pressed: [ false, true, true, true, false, true ] } }
+  # ---- S-75: the descriptor's invert on axis -> button ("go with yes")
+  - { id: a2b-descriptor-invert-unipolar, rule: S-75, kind: axis_button, source: { min: 0, rest: 0, max: 1000 }, source_invert: true, binding: { threshold: 0.75, hysteresis: 0.25 }, raws: [ 1000, 250, 0, 500, 501, 250 ],
+      expect: { pressed: [ false, true, true, true, false, true ] } }
+  - { id: a2b-descriptor-invert-bipolar, rule: S-75, kind: axis_button, source: { min: -32768, rest: 0, max: 32767 }, source_invert: true, binding: { threshold: 0.5, hysteresis: 0.25 }, raws: [ 0, -16383, -16384, -8192, -8191, 32767, -32768, 0 ],
+      expect: { pressed: [ false, false, true, true, false, false, true, false ] } }
+  - { id: a2b-descriptor-and-binding-invert-cancel, rule: S-75, kind: axis_button, source: { min: -32768, rest: 0, max: 32767 }, source_invert: true, binding: { threshold: -0.5, hysteresis: 0.25, invert: true }, raws: [ -16384, -8192, -8191, 16384, -16384 ],
+      expect: { pressed: [ true, true, false, false, true ] } }
+  # ---- S-75: one shared position per stay-put control ("I want you to do one shared position")
+  - { id: stay-put-shared-mouse-and-key-worked, rule: S-75, kind: stay_put, target: { min: 0, rest: 32768, max: 65535 }, rates: { up: { rate: 0.25 } }, integrates: [ { name: mouse, counts_per_travel: 2000 } ],
+      steps: [ { dt_ms: 0, held: [up] }, { dt_ms: 100, counts: { mouse: 100 }, held: [up] }, { dt_ms: 100, counts: { mouse: -200 }, held: [] }, { dt_ms: 100, held: [] } ],
+      expect: { values: [ 32768.0, 37683.125, 32768.0, 32768.0 ], rounded: [ 32768, 37683, 32768, 32768 ] } }
+  - { id: stay-put-shared-clamp-no-wind-up, rule: S-75, kind: stay_put, target: { min: 0, rest: 32768, max: 65535 }, rates: { up: { rate: 1.0 }, down: { rate: -1.0 } }, integrates: [ { name: mouse, counts_per_travel: 2000 } ],
+      steps: [ { dt_ms: 0, held: [up] }, { dt_ms: 1000, counts: { mouse: -100 }, held: [up] }, { dt_ms: 10, counts: { mouse: 4000 }, held: [] }, { dt_ms: 0, counts: { mouse: -1 }, held: [down] }, { dt_ms: 10, held: [] } ],
+      expect: { values: [ 32768.0, 62258.25, 65535.0, 65502.2325, 64846.8825 ], rounded: [ 32768, 62258, 65535, 65502, 64847 ] } }
+  - { id: stay-put-shared-recentre-wins, rule: S-75, kind: stay_put, target: { min: 0, rest: 32768, max: 65535 }, rates: { down: { rate: -0.5 } }, integrates: [ { name: mouse, counts_per_travel: 2000, recentre: mid } ],
+      steps: [ { dt_ms: 0, held: [down] }, { dt_ms: 100, counts: { mouse: 300 }, held: [down] }, { dt_ms: 100, counts: { mouse: 50 }, held: [down, mid] }, { dt_ms: 100, counts: { mouse: -100 }, held: [down] }, { dt_ms: 100, held: [] } ],
+      expect: { values: [ 32768.0, 39321.5, 32768.0, 26214.5, 22937.75 ], rounded: [ 32768, 39322, 32768, 26214, 22938 ] } }
+  - { id: stay-put-shared-invert-xor-last-pressed, rule: S-75, kind: stay_put, target: { min: 0, rest: 32768, max: 65535 }, rates: { up: { rate: 0.25 }, down: { rate: -0.25 } }, integrates: [ { name: mouse, counts_per_travel: 1000, invert: true }, { name: ball, counts_per_travel: 1000, invert: true, source_invert: true } ],
+      steps: [ { dt_ms: 0, counts: { mouse: 100 }, held: [up] }, { dt_ms: 40, counts: { ball: 100 }, held: [up, down] }, { dt_ms: 40, counts: { mouse: -50, ball: -50 }, held: [up] }, { dt_ms: 40, held: [] } ],
+      expect: { values: [ 26214.5, 33423.35, 32768.0, 33423.35 ], rounded: [ 26214, 33423, 32768, 33423 ] } }
+  - { id: stay-put-shared-two-mice-document-order, rule: S-75, kind: stay_put, target: { min: 0, rest: 32768, max: 65535 }, rates: {}, integrates: [ { name: mouse, counts_per_travel: 2000, recentre: mid }, { name: ball, counts_per_travel: 500, source_invert: true } ],
+      steps: [ { dt_ms: 0, counts: { mouse: 1000, ball: 100 }, held: [] }, { dt_ms: 16, counts: { mouse: -2000, ball: -50 }, held: [] }, { dt_ms: 16, counts: { mouse: 100, ball: 10 }, held: [mid] }, { dt_ms: 16, counts: { ball: -10 }, held: [] } ],
+      expect: { values: [ 52428.0, 6553.5, 31457.3, 32768.0 ], rounded: [ 52428, 6553, 31457, 32768 ] } }

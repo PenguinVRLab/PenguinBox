@@ -23,6 +23,7 @@
 #include "hw/core/cpu.h"
 #include "qemu/lockable.h"
 #include "trace/trace-root.h"
+#include "exec/xemu-tblookup.h"
 
 QemuMutex qemu_cpu_list_lock;
 static QemuCond exclusive_cond;
@@ -342,6 +343,7 @@ int cpu_breakpoint_insert(CPUState *cpu, vaddr pc, int flags,
     } else {
         QTAILQ_INSERT_TAIL(&cpu->breakpoints, bp, entry);
     }
+    xemu_fastptr_breakpoint_inserted(cpu);
 
     if (breakpoint) {
         *breakpoint = bp;

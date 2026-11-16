@@ -1,0 +1,52 @@
+# Thrustmaster HOTAS Warthog joystick (the A-10C stick replica). Art: devices/art/warthog_stick.svg, an
+# original schematic from the pilot's seat (docs/decisions.md S-21); the trigger, nosewheel steering button
+# and paddle face forward, so they are drawn reaching past the grip's right edge.
+# The control set (19 buttons and one 8-way hat): two-stage trigger, weapon release, nosewheel steering, master
+# mode, paddle, the trim hat (H1) and three 4-way hats, TMS (H2), DMS (H3) and CMS (H4, which also presses).
+# Positions from Thrustmaster's HOTAS Warthog Hardware User Manual, English section, ts.thrustmaster.com/download/accessories/pc/hotas/manual/HOTAS_Warthog/HOTAS_Warthog_Manual.pdf
+# (p. 4/18, button numbers; p. 7/18, the A-10C names), agreeing with the owner's photo from behind (2026-10-10,
+# not in the repo): weapon release (2) top left, trim hat top right, TMS (7-10) the RIBBED hat below the weapon
+# release, DMS (11-14) the CROSS-shaped hat below the trim hat, master mode (5) a button out of the head's right
+# side, CMS (15-19, with push) on the grip's left side; on the grip's front, top to bottom: the trigger (1 first
+# stage, 6 second), the nosewheel steering button (3) low on the grip, the pinkie lever / paddle (4) at the boot.
+# The owner's side photos (2026-10-10, not in the repo) agree: the grey master mode button on the head's right side,
+# about two thirds down it; the red trigger under the head's front overhang; a small grey NWS button just above the
+# boot; the black paddle in front of it, hinged at the boot and reaching up to mid-grip.
+# The owner's unit, read on the rig 2026-10-10 (tests/fixtures/udev/rig_2026-10-10_warthog_stick.txt): 044f:0402,
+# 19 buttons and the trim hat, X/Y 16-bit, no serial (two identical sticks would be told apart by port path only).
+schema: sim-profile/1
+kind: device
+id: warthog_stick
+name: "Thrustmaster Warthog stick"
+source: sdl_joystick
+match: { vid: 0x044f, pid: 0x0402 }
+art: devices/art/warthog_stick.svg
+# Input ids name a control's position or function; the real button and axis codes are captured on
+# the owner's hardware with press-to-identify (work/0009, work/0010), and the descriptor ranges are
+# placeholders until then. Anchors are points in the art's viewBox.
+inputs:
+  # Axes
+  - { id: stick_x, kind: axis, code: 0, min: -32768, rest: 0, max: 32767, anchor: [256, 290], label: "Stick left / right" }  # ABS_X
+  - { id: stick_y, kind: axis, code: 1, min: -32768, rest: 0, max: 32767, anchor: [256, 340], label: "Stick forward / back" }  # ABS_Y
+  # Trigger and buttons
+  - { id: trigger_stage1, kind: button, anchor: [316, 206], label: "Trigger, first stage" }
+  - { id: trigger_stage2, kind: button, anchor: [316, 229], label: "Trigger, second stage" }
+  - { id: weapon_release, kind: button, anchor: [172, 66], label: "Weapon release" }
+  - { id: nosewheel_steering, kind: button, anchor: [309, 362], label: "Nosewheel steering button" }
+  - { id: master_mode, kind: button, anchor: [316, 122], label: "Master mode button" }
+  - { id: paddle, kind: button, anchor: [331, 330], label: "Paddle switch (pinky lever)" }
+  # Hats
+  - { id: trim_hat, kind: hat, anchor: [262, 62], label: "Trim hat (8-way)" }
+  - { id: tms_up, kind: button, anchor: [176, 127], label: "TMS up" }
+  - { id: tms_right, kind: button, anchor: [182, 138], label: "TMS right" }
+  - { id: tms_down, kind: button, anchor: [176, 149], label: "TMS down" }
+  - { id: tms_left, kind: button, anchor: [170, 138], label: "TMS left" }
+  - { id: dms_up, kind: button, anchor: [266, 128], label: "DMS up" }
+  - { id: dms_right, kind: button, anchor: [278, 140], label: "DMS right" }
+  - { id: dms_down, kind: button, anchor: [266, 152], label: "DMS down" }
+  - { id: dms_left, kind: button, anchor: [254, 140], label: "DMS left" }
+  - { id: cms_up, kind: button, anchor: [160, 236], label: "CMS up" }
+  - { id: cms_right, kind: button, anchor: [169, 245], label: "CMS right" }
+  - { id: cms_down, kind: button, anchor: [160, 254], label: "CMS down" }
+  - { id: cms_left, kind: button, anchor: [151, 245], label: "CMS left" }
+  - { id: cms_press, kind: button, anchor: [160, 245], label: "CMS press" }

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simmerge: the merge layer's end-to-end fixture (written for XB-6, not the app's).
+schema: sim-profile/1
+kind: bindings
+id: e2e_pad_sb
+device: e2e_pad
+target: steel_battalion
+bind:
+  - { source: stick_x, target: rotation_lever }
+  - { source: stick_y, target: sight_change_y }
+  - { source: trig, target: left_pedal, response: { window: [0.1, 0.9] } }
+  - { source: stick_x, target: middle_pedal, policy: half_positive }
+  - { source: pedal_desc, target: right_pedal }
+  - { source: btn_a, target: main_weapon }
+  - { source: btn_b, target: sight_change_x, value: -0.5 }
+  - { source: btn_c, target: aiming_y, rate: 0.5 }
+  - { source: pov, target: gear_up, direction: up }
+  - { source: gate, target: gear_down, position: r }
+  - { source: trig, target: lock_on, threshold: 0.5, hysteresis: 0.1 }

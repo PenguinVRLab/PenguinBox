@@ -1,0 +1,21 @@
+# padxr-manifest v1 core=xbox
+absoluteAim	device	PER	device	device	design
+firstPerson.attach	firstPerson	CAM	camera	camera	design
+firstPerson.relocate	firstPerson	CAM	camera	camera	design
+hapticGloves	haptics-backend	RF	none	display	design
+micPassthrough	stream	STREAM	stream	stream	candidate
+sbcPanel	panel	PAD	merge	press	design
+sbcTwin	display	RF	none	display	design
+verb.aim	verb	PER	device	device	candidate
+verb.holdRelease	verb	PAD	merge	hold	candidate
+verb.itemSelect	verb	PAD	merge	press	candidate
+verb.look	verb	PAD	merge	axis	candidate
+verb.menuNavigate	verb	PAD	merge	press	candidate
+verb.move	verb	PAD	merge	axis	candidate
+verb.shoot	verb	PAD	merge	press	candidate
+verb.swingThrow	verb	PAD	merge	press	candidate
+verb.timedPress	verb	PAD	merge	press	candidate
+verb.vehicle	verb	PAD	merge	axis	candidate
+virtualHands	display	RF	none	display	design
+voiceCommand	voiceCommand	PAD	merge	sequence	candidate
+voiceSubstitution	voiceCommand	PAD	merge	sequence	design

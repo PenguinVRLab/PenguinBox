@@ -1,0 +1,16 @@
+# BAD fixture (work/0039): device_wheel.yaml with one change: inputs is empty. Load the good set with this file IN PLACE OF
+# device_wheel.yaml; it must be refused with INPUTS_REQUIRED.
+schema: sim-profile/1
+kind: device
+id: wheel
+source: sdl_joystick
+template: wheel_v1
+inputs: []
+outputs:
+- transport: sdl_haptic
+  effects:
+  - constant
+  - spring
+  gain: 0.35
+  clamp: 0.8
+  invert: false

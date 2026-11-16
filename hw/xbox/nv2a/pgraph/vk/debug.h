@@ -46,13 +46,13 @@ extern int nv2a_vk_dgroup_indent;
         assert(nv2a_vk_dgroup_indent >= 0); \
     } while (0)
 
-#define VK_CHECK(x)                                           \
-    do {                                                      \
-        VkResult vk_result = (x);                             \
-        if (vk_result != VK_SUCCESS) {                        \
-            fprintf(stderr, "vk_result = %d\n", vk_result);   \
-        }                                                     \
-        assert(vk_result == VK_SUCCESS && "vk check failed"); \
+#define VK_CHECK(x)                                               \
+    do {                                                          \
+        VkResult vk_check_res_ = (x);                             \
+        if (vk_check_res_ != VK_SUCCESS) {                        \
+            fprintf(stderr, "vk_result = %d\n", vk_check_res_);   \
+        }                                                         \
+        assert(vk_check_res_ == VK_SUCCESS && "vk check failed"); \
     } while (0)
 
 void pgraph_vk_debug_frame_terminator(void);

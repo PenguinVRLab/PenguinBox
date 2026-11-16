@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# tests/xbox/simmerge: the merge layer's end-to-end fixture (written for XB-6, not the app's).
+schema: sim-profile/1
+kind: ports
+id: e2e
+ports:
+  1:
+    target: steel_battalion
+    profile: e2e_sb
+    devices:
+      - { device: e2e_pad, port_path: pci-e2e-1 }
+      - { device: e2e_mouse }
+  2: { target: steel_battalion }

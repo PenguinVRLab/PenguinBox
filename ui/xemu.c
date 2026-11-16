@@ -46,7 +46,6 @@
 #include "xemu-input.h"
 #include "xemu-sbc-device.h"
 #include "xemu-settings.h"
-#include "xemu-sim-profiles.h"
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
@@ -742,6 +741,17 @@ static void vblank_timer_callback(void *opaque)
     timer_mod_ns(vblank_timer, now + vblank_interval_ns);
 }
 
+static bool vblank_early(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XEMU_VBLANK_EARLY");
+        on = e && e[0] && e[0] != '0';
+    }
+    return on;
+}
+
+
 static void *vblank_timer_thread(void *opaque)
 {
     struct xemu_console *scon = (struct xemu_console *)opaque;
@@ -758,7 +768,13 @@ static void *vblank_timer_thread(void *opaque)
         }
 
         if (!qatomic_read(&qemu_exiting)) {
-            xemu_main_loop_lock();
+            if (vblank_early()) {
+                bql_lock();
+                nv2a_vblank_raise_early();
+                bql_unlock();
+            }
+            qemu_mutex_lock_main_loop();
+            bql_lock();
             process_vblank(scon);
             xemu_main_loop_unlock();
         }
@@ -880,9 +896,9 @@ static void poll_events(struct xemu_console *scon)
                     !(ev->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT))) {
                     xemu_vr_request_recenter();
                 }
-                if (ev->key.scancode == SDL_SCANCODE_F9 &&
+                if (ev->key.scancode == SDL_SCANCODE_F10 &&
                     !(ev->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT))) {
-                    xemu_vr_request_hunt_dump();
+                    xemu_vr_hands_trace_mark();
                 }
             }
 #endif
@@ -962,7 +978,7 @@ static void display_very_early_init(DisplayOptions *o)
         SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    char *title = g_strdup_printf("xemu | v%s"
+    char *title = g_strdup_printf("PenguinBox | v%s"
 #ifdef XEMU_DEBUG_BUILD
                                   " Debug"
 #endif
@@ -1236,7 +1252,7 @@ static void setup_nvidia_profile(void)
 
 static void init_sdl_app_metadata(void)
 {
-    SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "xemu");
+    SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "PenguinBox");
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_VERSION_STRING,
                                xemu_version);
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_IDENTIFIER_STRING,
@@ -1302,6 +1318,9 @@ int main(int argc, char **argv)
         exit(1);
     }
     atexit(xemu_settings_save);
+#ifdef CONFIG_VULKAN
+    vr_sbc_panel_gloves_init();
+#endif
 
 #ifdef _WIN32
     if (g_config.display.setup_nvidia_profile) {
@@ -1328,7 +1347,7 @@ int main(int argc, char **argv)
 
     xemu_main_loop_lock();
     xemu_input_init();
-    sim_gate_init(sbc_device_init());
+    sbc_device_init();
     xemu_main_loop_unlock();
 
     struct xemu_console *scon = &scon_list[0];

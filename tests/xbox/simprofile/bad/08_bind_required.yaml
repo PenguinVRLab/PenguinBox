@@ -1,0 +1,8 @@
+# BAD fixture (work/0039): bindings_wheel.yaml with one change: bind is empty. Load the good set with this file IN PLACE OF
+# bindings_wheel.yaml; it must be refused with BIND_REQUIRED.
+schema: sim-profile/1
+kind: bindings
+id: pgr2_wheel
+device: wheel
+target: xbox_duke
+bind: []

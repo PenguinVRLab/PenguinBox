@@ -21,9 +21,12 @@ subdir('thirdparty')
 
 xemu_ss = ss.source_set()
 xemu_ss.add(files(
+  'xemu-cpu-floor.c',
   'xemu-input.c',
   'xemu-sbc-device.c',
   'xemu-sim-profiles.c',
+  'xemu-sim-handoff.c',
+  'xemu-sim-boot.c',
   'xemu-monitor.c',
   'xemu-net.c',
   'xemu-settings.cc',
@@ -34,10 +37,28 @@ xemu_ss.add(files(
   'xemu-snapshots.c',
   'xemu-thumbnail.cc',
   'xemu-widescreen.c',
+  'xemu-disc-xbe.c',
+  'xemu-yaml-lite.c',
+  'xemu-machine-profile.c',
+  'xemu-machine-profile-store.cc',
 ))
 
 if host_os == 'windows'
   xemu_ss.add(nvapi)
+endif
+
+# The Sim Configurator profile reader (B-SHIP-1 XB-5), on the vendored rapidyaml
+# (thirdparty/meson.build: the vr-mods reader's parser). Its test is
+# tests/xbox/simprofile (make check; make drill for its RED drills).
+xemu_ss.add(files('xemu-sim-profile-reader.cc'), ryml)
+# The merge layer (B-SHIP-1 XB-6): the arithmetic core, the writers into the controllers' state, and the port that
+# drives them (INPUT_DEVICE_SIM_PORT). Tests: tests/xbox/simmerge (make check; make drill; make keys).
+xemu_ss.add(files('xemu-sim-merge.c', 'xemu-sim-target.c', 'xemu-sim-port.c'))
+# The Sim Configurator hand-off's D-Bus activation route (B-SHIP-1 D3): with gio, else a stub that says so
+if gio.found()
+  xemu_ss.add(files('xemu-sim-dbus.c'), gio)
+else
+  xemu_ss.add(files('xemu-sim-dbus-stub.c'))
 endif
 
 # The host-side Steel Battalion reader (xemu-sbc-device.c) is gated on

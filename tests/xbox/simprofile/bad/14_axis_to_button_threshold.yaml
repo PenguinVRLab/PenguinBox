@@ -1,0 +1,17 @@
+# BAD fixture (work/0039): bindings_wheel.yaml with one change: an axis on a plain (non-analog) button with no threshold. Load the good set with this file IN PLACE OF
+# bindings_wheel.yaml; it must be refused with AXIS_TO_BUTTON_THRESHOLD.
+schema: sim-profile/1
+kind: bindings
+id: pgr2_wheel
+device: wheel
+target: xbox_duke
+bind:
+- source: steering
+  target: start
+- source: paddle_up
+  target: a
+- source: paddle_down
+  target: b
+- source: pov
+  target: dpad_up
+  direction: up

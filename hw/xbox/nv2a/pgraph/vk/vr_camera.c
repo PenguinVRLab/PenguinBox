@@ -11,8 +11,8 @@
 #include "renderer.h"
 #include "vr.h"
 #include "vr_internal.h"
+#include "hw/xbox/nv2a/pgraph/vr_worldproj.h"
 
-#define VR_HUNT_DIR_FMT    "%s/xemu-vr-hunt"
 #define WRAP_PI(a) \
     ((a) > (float)M_PI  ? (a) - 2.0f * (float)M_PI : \
      (a) < -(float)M_PI ? (a) + 2.0f * (float)M_PI : (a))
@@ -25,12 +25,6 @@ static inline float wrap_period(float x, float period)
     return x - period * roundf(x / period);
 }
 
-typedef struct VRHuntJob {
-    void *data;
-    size_t size;
-    uint32_t index;
-    float head_yaw, head_pitch;
-} VRHuntJob;
 
 static bool parse_addr(const char *str, uint64_t ram_size, uint32_t *out)
 {
@@ -75,7 +69,7 @@ static void refresh_addrs(VRCamera *cam, uint64_t ram_size)
                                                &cam->gate_addr);
         cam->gate_was_on = false;
         if (gs && gs[0] && !cam->gate_addr_valid) {
-            fprintf(stderr, "xemu-vr: headlook_gate_addr '%s' invalid\n",
+            fprintf(stderr, "PenguinBox: headlook_gate_addr '%s' invalid\n",
                     gs);
         }
     }
@@ -86,7 +80,7 @@ static void refresh_addrs(VRCamera *cam, uint64_t ram_size)
         cam->yaw_addr_valid = parse_addr(ys, ram_size, &cam->yaw_addr);
         cam->base_captured = false;
         if (ys && ys[0] && !cam->yaw_addr_valid) {
-            fprintf(stderr, "xemu-vr: headlook_yaw_addr '%s' invalid "
+            fprintf(stderr, "PenguinBox: headlook_yaw_addr '%s' invalid "
                             "(need 4-aligned address < 0x%" PRIx64 ")\n",
                     ys, ram_size);
         }
@@ -97,7 +91,7 @@ static void refresh_addrs(VRCamera *cam, uint64_t ram_size)
         cam->pitch_addr_valid = parse_addr(ps, ram_size, &cam->pitch_addr);
         cam->base_captured = false;
         if (ps && ps[0] && !cam->pitch_addr_valid) {
-            fprintf(stderr, "xemu-vr: headlook_pitch_addr '%s' invalid\n",
+            fprintf(stderr, "PenguinBox: headlook_pitch_addr '%s' invalid\n",
                     ps);
         }
     }
@@ -161,7 +155,7 @@ static void refresh_base(VRCamera *cam, uint64_t ram_size)
         cam->base_ptr_valid = parse_addr(ps, ram_size, &cam->base_ptr);
         cam->base_captured = false;
         if (ps && ps[0] && !cam->base_ptr_valid) {
-            fprintf(stderr, "xemu-vr: headlook_base_ptr '%s' invalid\n", ps);
+            fprintf(stderr, "PenguinBox: headlook_base_ptr '%s' invalid\n", ps);
         }
     }
     if (g_strcmp0(as, cam->base_aob_str) != 0) {
@@ -244,7 +238,7 @@ static bool resolve_cam_base(VRCamera *cam, NV2AState *d, uint64_t ram,
                 cam->aob_base = (uint32_t)b;
                 cam->aob_resolved = true;
                 *base = cam->aob_base;
-                fprintf(stderr, "xemu-vr: camera AOB resolved: base 0x%08X\n",
+                fprintf(stderr, "PenguinBox: camera AOB resolved: base 0x%08X\n",
                         cam->aob_base);
                 return true;
             }
@@ -273,91 +267,21 @@ static void head_angles_rel(const VRCompositor *c, float *yaw, float *pitch)
     *pitch = head_pitch;
 }
 
-static void *hunt_write_thread(void *opaque)
-{
-    VRHuntJob *job = opaque;
-    g_autofree char *dir =
-        g_strdup_printf(VR_HUNT_DIR_FMT, g_get_home_dir());
-    g_mkdir_with_parents(dir, 0755);
-
-    g_autofree char *bin =
-        g_strdup_printf("%s/dump-%03u.bin", dir, job->index);
-    g_autofree char *txt =
-        g_strdup_printf("%s/dump-%03u.txt", dir, job->index);
-
-    FILE *f = fopen(bin, "wb");
-    if (f != NULL) {
-        fwrite(job->data, 1, job->size, f);
-        fclose(f);
-    }
-    f = fopen(txt, "w");
-    if (f != NULL) {
-        fprintf(f, "head_yaw_deg=%.2f\nhead_pitch_deg=%.2f\nsize=%zu\n",
-                job->head_yaw * (180.0f / (float)M_PI),
-                job->head_pitch * (180.0f / (float)M_PI), job->size);
-        fclose(f);
-    }
-    fprintf(stderr, "xemu-vr: hunt dump %03u written (%s).\n", job->index,
-            bin);
-
-    g_free(job->data);
-    g_free(job);
-    return NULL;
-}
-
-static void hunt_dump(VRCamera *cam, NV2AState *d, float yaw, float pitch)
-{
-    const size_t size = memory_region_size(d->vram);
-
-    VRHuntJob *job = g_new0(VRHuntJob, 1);
-    job->data = g_malloc(size);
-    job->size = size;
-    job->index = cam->hunt_count++;
-    job->head_yaw = yaw;
-    job->head_pitch = pitch;
-    memcpy(job->data, d->vram_ptr, size);
-
-    QemuThread t;
-    qemu_thread_create(&t, "vr-hunt-write", hunt_write_thread, job,
-                       QEMU_THREAD_DETACHED);
-}
-
-void vr_camera_request_hunt_dump(void)
-{
-    qatomic_set(&g_xemu_vr.cam.hunt_requested, true);
-}
 
 void vr_camera_reset(void)
 {
     g_xemu_vr.cam.base_captured = false;
 }
 
-void vr_camera_hunt_poll(PGRAPHState *pg)
-{
-    VRCamera *cam = &g_xemu_vr.cam;
-    VRCompositor *c = &g_xemu_vr.comp;
-    NV2AState *d = container_of(pg, NV2AState, pgraph);
 
-    if (!g_config.vr.hunt_enable) {
-        return;
-    }
-    if (!qatomic_xchg(&cam->hunt_requested, false)) {
-        return;
-    }
-
-    float yaw = 0.0f, pitch = 0.0f;
-    if (c->head_pose_valid) {
-        head_angles_rel(c, &yaw, &pitch);
-    }
-    hunt_dump(cam, d, yaw, pitch);
-}
+static void vr_camera_write(PGRAPHState *pg, float yaw, float pitch,
+                            bool ref_zero);
 
 void vr_camera_frame(PGRAPHState *pg)
 {
-    VRCamera *cam = &g_xemu_vr.cam;
     VRCompositor *c = &g_xemu_vr.comp;
-    NV2AState *d = container_of(pg, NV2AState, pgraph);
-    const uint64_t ram_size = memory_region_size(d->vram);
+
+    vr_worldproj_set_slave(false, 0.0, 0.0);
 
     if (!c->head_pose_valid) {
         return;
@@ -365,6 +289,16 @@ void vr_camera_frame(PGRAPHState *pg)
 
     float yaw, pitch;
     head_angles_rel(c, &yaw, &pitch);
+    vr_camera_write(pg, yaw, pitch, false);
+}
+
+
+static void vr_camera_write(PGRAPHState *pg, float yaw, float pitch,
+                            bool ref_zero)
+{
+    VRCamera *cam = &g_xemu_vr.cam;
+    NV2AState *d = container_of(pg, NV2AState, pgraph);
+    const uint64_t ram_size = memory_region_size(d->vram);
 
     if (!g_config.vr.headlook_enable) {
         cam->base_captured = false;
@@ -408,15 +342,15 @@ void vr_camera_frame(PGRAPHState *pg)
 
     if (!cam->base_captured) {
         cam->yaw_base = *yaw_ptr;
-        cam->head_ref_yaw = yaw;
+        cam->head_ref_yaw = ref_zero ? 0.0f : yaw;
         cam->last_written_yaw = *yaw_ptr;
         if (pitch_ptr) {
             cam->pitch_base = *pitch_ptr;
-            cam->head_ref_pitch = pitch;
+            cam->head_ref_pitch = ref_zero ? 0.0f : pitch;
             cam->last_written_pitch = *pitch_ptr;
         }
         cam->base_captured = true;
-        fprintf(stderr, "xemu-vr: head-look zeroed (game yaw=%f%s, head ref "
+        fprintf(stderr, "PenguinBox: head-look zeroed (game yaw=%f%s, head ref "
                         "%.1f/%.1f deg, base 0x%08X).\n", cam->yaw_base,
                 pitch_ptr ? "" : " [pitch off]",
                 yaw * (180.0f / (float)M_PI),
@@ -437,10 +371,22 @@ void vr_camera_frame(PGRAPHState *pg)
     if (pitch_ptr) {
         const float game_pitch = *pitch_ptr;
         cam->pitch_base += game_pitch - cam->last_written_pitch;
-        const float out_pitch =
+        float out_pitch =
             cam->pitch_base + (pitch - cam->head_ref_pitch) * sens * sign;
+        const float pmin = g_config.vr.headlook_pitch_min;
+        const float pmax = g_config.vr.headlook_pitch_max;
+        if (pmax > pmin) {
+            out_pitch = out_pitch < pmin ? pmin :
+                        out_pitch > pmax ? pmax : out_pitch;
+        }
         *pitch_ptr = out_pitch;
         cam->last_written_pitch = out_pitch;
+    }
+
+    {
+        const double k = period > 0.0f ? 2.0 * M_PI / period : 1.0;
+        vr_worldproj_set_slave(true, cam->yaw_base * k,
+                               pitch_ptr ? cam->pitch_base * k : NAN);
     }
 }
 
